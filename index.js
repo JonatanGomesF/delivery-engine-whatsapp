@@ -4,8 +4,8 @@
 //   1. Inicializa WhatsApp via whatsapp-web.js
 //   2. Processa mensagens via botEngine.js
 //   3. Publica status/QR Code na tabela bot_status (Supabase)
-//   4. Expõe API Express local para o Painel Cliente ler se necessário
-// Sem Socket.io — comunicação com frontend via Supabase Realtime.
+//   4. Escuta comandos do Painel Master via Supabase Realtime (~1s)
+// Arquitetura 100% Supabase — sem Cloudflare Tunnel, sem polling.
 // ================================================================
 require('dotenv').config();
 
@@ -85,9 +85,7 @@ app.post('/api/bot/logout', async (req, res) => {
     }
 });
 
-// ── Polling do comando de restart do Painel Master ────────────────
-// O Painel Master grava restart_requested_at na tabela bot_status.
-// A engine verifica a cada 30s e reinicia se detectar novo comando.
+// ── Supabase Client (compartilhado) ──────────────────────────────
 const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(
     process.env.SUPABASE_URL,
@@ -95,36 +93,59 @@ const supabase = createClient(
     { auth: { persistSession: false } }
 );
 
-let lastRestartTs = null;
-async function verificarComandoRestart() {
-    try {
-        const { data } = await supabase
-            .from('bot_status')
-            .select('restart_requested_at, restart_action')
-            .eq('cliente_id', process.env.CLIENTE_ID)
-            .single();
+// ── Executar comando recebido do Painel Master ────────────────────
+async function executarComandoRemoto(payload) {
+    const acao = payload.restart_action || 'restart';
+    const ts   = payload.restart_requested_at;
+    if (!ts) return; // sem comando pendente
 
-        if (!data?.restart_requested_at) return;
-        if (data.restart_requested_at === lastRestartTs) return;
+    console.log(`⚡ [REALTIME COMANDO] Ação "${acao}" recebida do Painel Master em tempo real!`);
 
-        lastRestartTs = data.restart_requested_at;
-        const acao = data.restart_action || 'restart';
-        console.log(`⚡ [PM2 COMANDO] Ação "${acao}" recebida do Painel Master!`);
+    // Limpa o comando imediatamente para evitar re-execução
+    await supabase
+        .from('bot_status')
+        .update({ restart_requested_at: null, restart_action: null })
+        .eq('cliente_id', process.env.CLIENTE_ID);
 
-        // Limpa o comando para não executar de novo
-        await supabase
-            .from('bot_status')
-            .update({ restart_requested_at: null, restart_action: null })
-            .eq('cliente_id', process.env.CLIENTE_ID);
-
-        if (acao === 'disconnect') {
-            await whatsappManager.logout();
-        } else {
-            await whatsappManager.restart();
-        }
-    } catch(e) {
-        // Silencioso — polling não deve derrubar a engine
+    if (acao === 'disconnect') {
+        try { await whatsappManager.logout(); } catch(e) { logErro('LOGOUT', e); }
+    } else {
+        setTimeout(async () => {
+            try { await whatsappManager.restart(); } catch(e) { logErro('RESTART', e); }
+        }, 800); // pequeno delay para a resposta da limpeza chegar ao Supabase
     }
+}
+
+// ── Supabase Realtime — escuta comandos do Painel Master ──────────
+// Substitui o polling de 30s: latência cai para ~1 segundo.
+function iniciarRealtimeCommands() {
+    const clienteId = process.env.CLIENTE_ID;
+
+    supabase
+        .channel(`engine-commands-${clienteId}`)
+        .on(
+            'postgres_changes',
+            {
+                event:  'UPDATE',
+                schema: 'public',
+                table:  'bot_status',
+                filter: `cliente_id=eq.${clienteId}`
+            },
+            async (payload) => {
+                const novo = payload.new || {};
+                // Executa apenas se vier um novo timestamp de restart
+                if (novo.restart_requested_at) {
+                    await executarComandoRemoto(novo);
+                }
+            }
+        )
+        .subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+                console.log(`⚡ [REALTIME] Escutando comandos do Painel Master para "${clienteId}"... (~1s latência)`);
+            } else if (status === 'CHANNEL_ERROR') {
+                console.error('❌ [REALTIME] Erro no canal de comandos. Tentando reconectar...');
+            }
+        });
 }
 
 // ── Inicialização ─────────────────────────────────────────────────
@@ -134,6 +155,7 @@ async function main() {
     console.log('⚡  DELIVERY ENGINE WHATSAPP — Repositório 3');
     console.log(`🆔  Tenant: ${process.env.CLIENTE_ID || 'NÃO CONFIGURADO'}`);
     console.log(`🌐  API local: http://localhost:${PORT}`);
+    console.log('📡  Comandos via: Supabase Realtime (~1s)');
     console.log('======================================================');
     console.log('');
 
@@ -152,14 +174,13 @@ async function main() {
     // Inicializa WhatsApp (grava QR/Status na tabela bot_status via whatsappClient.js)
     await whatsappManager.initialize();
 
-    // Inicia API Express
+    // Inicia API Express local (healthcheck + status)
     server.listen(PORT, () => {
         console.log(`🚀 [API LOCAL] Engine ouvindo em http://localhost:${PORT}`);
     });
 
-    // Polling de comandos do Painel Master (a cada 30s)
-    setInterval(verificarComandoRestart, 30000);
-    console.log('⚡ [PM2 POLLING] Verificando comandos do Master Admin a cada 30s...');
+    // Substitui polling por Supabase Realtime (~1s de latência)
+    iniciarRealtimeCommands();
 }
 
 main().catch(err => {
