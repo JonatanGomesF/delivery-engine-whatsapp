@@ -4,36 +4,54 @@
 // ================================================================
 module.exports = {
     apps: [
+        // ── Tenant 1: restaurante_bom_sabor2 ─────────────────────
         {
             name:        'delivery-engine',
             script:      'index.js',
             cwd:         __dirname,
-
-            // ── Restart automático ────────────────────────────────
-            watch:          false,          // não reinicia ao salvar arquivo
-            autorestart:    true,           // reinicia se o processo cair
-            max_restarts:   10,             // máximo 10 reinícios consecutivos
-            min_uptime:     '10s',          // considera estável após 10s online
-            restart_delay:  5000,           // espera 5s antes de reiniciar
-
-            // ── Logs em arquivo ───────────────────────────────────
-            error_file:  './logs/error.log',
-            out_file:    './logs/output.log',
+            watch:       false,
+            autorestart: true,
+            max_restarts: 10,
+            min_uptime:  '10s',
+            restart_delay: 5000,
+            error_file:  './logs/engine1-error.log',
+            out_file:    './logs/engine1-output.log',
             log_date_format: 'YYYY-MM-DD HH:mm:ss',
             merge_logs:  true,
-
-            // ── Variáveis de Ambiente ─────────────────────────────
-            env: {
-                NODE_ENV: 'production',
-                PORT:     3001            // porta diferente do dev local (3000)
-            },
-
-            // ── Memória e Recursos ────────────────────────────────
-            max_memory_restart: '800M',   // reinicia se ultrapassar 800MB (Chrome/Puppeteer pesa)
-
-            // ── Interpretador ─────────────────────────────────────
+            max_memory_restart: '800M',
             interpreter: 'node',
-            exec_mode:   'fork'           // fork (não cluster) — WhatsApp Web.js não é compatível com cluster
+            exec_mode:   'fork',
+            env: {
+                NODE_ENV:           'production',
+                PORT:               3001,
+                CLIENTE_ID:         'restaurante_bom_sabor2',
+                WWEBJS_AUTH_PATH:   './.wwebjs_auth_engine1'   // sessão isolada por tenant
+            }
+        },
+
+        // ── Tenant 2: pizzaria_teste ──────────────────────────────
+        {
+            name:        'delivery-engine-pizzaria',
+            script:      'index.js',
+            cwd:         __dirname,
+            watch:       false,
+            autorestart: true,
+            max_restarts: 10,
+            min_uptime:  '10s',
+            restart_delay: 5000,
+            error_file:  './logs/engine2-error.log',
+            out_file:    './logs/engine2-output.log',
+            log_date_format: 'YYYY-MM-DD HH:mm:ss',
+            merge_logs:  true,
+            max_memory_restart: '800M',
+            interpreter: 'node',
+            exec_mode:   'fork',
+            env: {
+                NODE_ENV:           'production',
+                PORT:               3002,
+                CLIENTE_ID:         'pizzaria_teste',
+                WWEBJS_AUTH_PATH:   './.wwebjs_auth_engine2'   // sessão isolada — QR próprio
+            }
         }
     ]
 };

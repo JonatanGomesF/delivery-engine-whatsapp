@@ -120,7 +120,12 @@ class WhatsAppManager {
         this.emit('status_change', { status: this.status, message: 'Iniciando navegador WhatsApp...' });
 
         try {
-            const authPath = path.join(APP_DIR, '.wwebjs_auth');
+            // Pasta de sessão isolada por tenant (via WWEBJS_AUTH_PATH no ecosystem.config.js)
+            const authPath = process.env.WWEBJS_AUTH_PATH
+                ? path.resolve(APP_DIR, process.env.WWEBJS_AUTH_PATH)
+                : path.join(APP_DIR, '.wwebjs_auth');
+            console.log(`📁 [AUTH] Sessão WhatsApp: ${authPath}`);
+
             const chromeExec = findChromeExecutable();
 
             if (chromeExec) {
