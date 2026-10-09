@@ -1065,6 +1065,8 @@ async function sincronizarComSupabase() {
             cacheLocal.config.horarioJantar     = clienteData.horario_jantar    || cacheLocal.config.horarioJantar;
             cacheLocal.config.fechadoHoje       = clienteData.fechado_hoje !== undefined ? clienteData.fechado_hoje : cacheLocal.config.fechadoHoje;
             cacheLocal.config.motivoFechado     = clienteData.motivo_fechado    || cacheLocal.config.motivoFechado;
+            // Nicho do tenant (lido em tempo de execução do Supabase)
+            if (clienteData.niche) cacheLocal.config.niche = clienteData.niche;
         }
 
         // 2. Busca cardápio do Supabase (se houver registros lá)
@@ -1469,6 +1471,11 @@ function getConfig() {
     return cacheLocal.config;
 }
 
+// Retorna o niche do tenant (lido do Supabase em tempo de execução)
+function getNiche() {
+    return cacheLocal.config.niche || 'delivery';
+}
+
 function salvarConfig(novaConfig) {
     cacheLocal.config = { ...cacheLocal.config, ...novaConfig };
     if (novaConfig.nomeRestaurante) cacheLocal.config.nomeSalao = novaConfig.nomeRestaurante;
@@ -1565,6 +1572,7 @@ module.exports = {
     setEstadoConversa,
     limparEstadoConversa,
     getConfig,
+    getNiche,
     salvarConfig,
     criarAgendamento,
     cancelarAgendamento,

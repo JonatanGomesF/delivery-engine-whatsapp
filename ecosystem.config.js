@@ -75,7 +75,7 @@ module.exports = {
                 NODE_ENV:           'production',
                 PORT:               3003,
                 CLIENTE_ID:         'barbearia_estilo',       // ← id do tenant no Supabase
-                NICHE:              'barbershop',              // ← carrega botEngine_barbershop.js
+                // NICHE não é mais necessário — o motor único lê o niche do Supabase
                 WWEBJS_AUTH_PATH:   './.wwebjs_auth_engine3'  // sessão WhatsApp isolada
             }
         }

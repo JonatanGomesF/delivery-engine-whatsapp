@@ -1,4 +1,36 @@
+// =====================================================================
+// src/botEngine.js — Motor Único Genérico (Multi-Nicho)
+// ---------------------------------------------------------------------
+// Lê o niche do tenant em tempo de execução (via database.js) e adapta
+// o fluxo e as mensagens dinamicamente:
+//   - flow 'order'       → delivery (cardápio → item → carrinho → entrega)
+//   - flow 'appointment' → barbershop/clinic/petshop/salon (serviço → data → horário)
+// Usa as tabelas existentes: cardapio (itens) e pedidos (transações).
+// =====================================================================
+
 const db = require('./database');
+const { getNicheConfig, getNicheTerms, getNicheFlow } = require('./niches');
+
+// ── Cache de niche (lido do Supabase, atualizado a cada 5 min) ──────
+let _cachedNiche = null;
+let _nicheTimestamp = 0;
+const NICHE_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+
+function getNiche() {
+    const now = Date.now();
+    if (_cachedNiche && (now - _nicheTimestamp) < NICHE_CACHE_TTL) {
+        return _cachedNiche;
+    }
+    _cachedNiche = db.getNiche() || 'delivery';
+    _nicheTimestamp = now;
+    return _cachedNiche;
+}
+
+// Força atualização do cache (útil após sincronização)
+function refreshNicheCache() {
+    _nicheTimestamp = 0;
+    return getNiche();
+}
 
 // Interpolação flexível de variáveis em templates de texto (ex: {nome}, {codigo}, {total})
 function formatarTexto(template, vars = {}) {
@@ -30,7 +62,9 @@ function formatarMoeda(valor) {
     return `R$ ${(Number(valor) || 0).toFixed(2).replace('.', ',')}`;
 }
 
-// Processador principal de mensagens do WhatsApp
+// =====================================================================
+// PROCESSADOR PRINCIPAL — exportado e usado pelo whatsappClient.js
+// =====================================================================
 async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, emitEvent }) {
     const nomeCliente = (nome || 'Cliente').split(' ')[0];
     const mensagemLimpa = (texto || '').trim();
@@ -40,6 +74,12 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
     const config = db.getConfig();
     const mensagens = config.mensagens || {};
     const estado = db.getEstadoConversa(from);
+
+    // ── Nicho em tempo de execução ─────────────────────────────────
+    const niche = getNiche();
+    const nicheConfig = getNicheConfig(niche);
+    const terms = getNicheTerms(niche);
+    const flow = getNicheFlow(niche);
 
     const logEvento = (tipo, detalhe) => {
         if (emitEvent) {
@@ -66,7 +106,7 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
             try {
                 await sendMessage(config.numeroDono, mensagemNotificacao);
             } catch (err) {
-                console.error("⚠️ Erro ao notificar restaurante via WhatsApp:", err.message);
+                console.error("⚠️ Erro ao notificar estabelecimento via WhatsApp:", err.message);
             }
         }
     };
@@ -74,51 +114,71 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
     logEvento('entrada', mensagemLimpa);
 
     // 1. Comandos Globais de Interrupção / Menu / Início / Saudação
-    if (mensagemSemPontuacao === 'menu' || mensagemSemPontuacao === 'voltar' || 
+    if (mensagemSemPontuacao === 'menu' || mensagemSemPontuacao === 'voltar' ||
         mensagemSemPontuacao === 'inicio' || mensagemSemPontuacao === 'início' ||
         mensagemSemPontuacao === 'zerar' || mensagemSemPontuacao === 'recomecar' ||
-        mensagemSemPontuacao.match(/^(oi|olá|ola|bom dia|boa tarde|boa noite|opa|eai|eae|start|comecar|começar|oie|salve|fome|pedir)$/i)) {
+        mensagemSemPontuacao.match(/^(oi|olá|ola|bom dia|boa tarde|boa noite|opa|eai|eae|start|comecar|começar|oie|salve|fome|pedir|agendar)$/i)) {
         db.limparEstadoConversa(from);
-        return await enviarMenuPrincipal(responder, nomeCliente, config);
+        return await enviarMenuPrincipal(responder, nomeCliente, config, terms);
     }
 
     if (mensagemSemPontuacao === 'cancelar' || mensagemSemPontuacao === 'desistir') {
-        return await processarFluxoCancelamento(responder, from, nomeCliente, config, emitEvent, notificarDono);
+        return await processarFluxoCancelamento(responder, from, nomeCliente, config, terms, emitEvent, notificarDono);
     }
 
-    if (mensagemSemPontuacao === 'status' || mensagemSemPontuacao === 'rastrear' || mensagemSemPontuacao === 'meu pedido') {
-        return await consultarStatusPedido(responder, from, nomeCliente, config);
+    if (mensagemSemPontuacao === 'status' || mensagemSemPontuacao === 'rastrear' || mensagemSemPontuacao === 'meu pedido' || mensagemSemPontuacao === 'meu agendamento') {
+        return await consultarStatusPedido(responder, from, nomeCliente, config, terms);
     }
 
-    if (mensagemSemPontuacao === 'cardapio' || mensagemSemPontuacao === 'cardápio') {
-        return await enviarCardapioCompleto(responder, config);
+    if (mensagemSemPontuacao === 'cardapio' || mensagemSemPontuacao === 'cardápio' || mensagemSemPontuacao === 'servicos' || mensagemSemPontuacao === 'serviços') {
+        return await enviarCardapioCompleto(responder, config, terms);
     }
 
     const numOpcao = extrairNumeroOpcao(mensagemLimpa);
 
     // 2. Se o cliente estiver sem estado ativo (idle)
     if (!estado || estado.status === 'idle' || !estado.status) {
-        if (mensagemLower.match(/(pedir|pedido|marmita|marmitex|pizza|comida|fazer pedido|delivery|lanche)/i)) {
-            return await iniciarFluxoPedido(responder, from, config);
+        const triggerRegex = flow === 'order'
+            ? /(pedir|pedido|marmita|marmitex|pizza|comida|fazer pedido|delivery|lanche)/i
+            : /(agendar|agendamento|horario|horário|marcar|consulta|servico|serviço|corte|barba)/i;
+
+        if (mensagemLower.match(triggerRegex)) {
+            return flow === 'order'
+                ? await iniciarFluxoPedido(responder, from, config, terms)
+                : await iniciarFluxoAgendamento(responder, from, config, terms);
         }
 
         if (numOpcao === 1) {
-            return await iniciarFluxoPedido(responder, from, config);
+            return flow === 'order'
+                ? await iniciarFluxoPedido(responder, from, config, terms)
+                : await iniciarFluxoAgendamento(responder, from, config, terms);
         } else if (numOpcao === 2) {
-            return await enviarCardapioCompleto(responder, config);
+            return await enviarCardapioCompleto(responder, config, terms);
         } else if (numOpcao === 3) {
-            return await consultarStatusPedido(responder, from, nomeCliente, config);
+            return await consultarStatusPedido(responder, from, nomeCliente, config, terms);
         } else if (numOpcao === 4) {
-            return await enviarInfoRestaurante(responder, config);
+            return await enviarInfoEstabelecimento(responder, config, terms);
         } else if (numOpcao === 5) {
-            return await processarFluxoCancelamento(responder, from, nomeCliente, config, emitEvent, notificarDono);
+            return await processarFluxoCancelamento(responder, from, nomeCliente, config, terms, emitEvent, notificarDono);
         } else {
-            return await enviarMenuPrincipal(responder, nomeCliente, config);
+            return await enviarMenuPrincipal(responder, nomeCliente, config, terms);
         }
     }
 
     // 3. Máquina de Estados da Conversa
+    if (flow === 'order') {
+        return await processarFluxoOrder({ responder, from, nomeCliente, estado, config, mensagens, terms, numOpcao, mensagemLimpa, mensagemLower, emitEvent, notificarDono });
+    } else {
+        return await processarFluxoAppointment({ responder, from, nomeCliente, estado, config, mensagens, terms, numOpcao, mensagemLimpa, mensagemLower, emitEvent, notificarDono, niche });
+    }
+}
+
+// =====================================================================
+// FLUXO ORDER — Delivery (cardápio → item → carrinho → entrega)
+// =====================================================================
+async function processarFluxoOrder({ responder, from, nomeCliente, estado, config, mensagens, terms, numOpcao, mensagemLimpa, mensagemLower, emitEvent, notificarDono }) {
     switch (estado.status) {
+
         // ---- ETAPA 1: ESCOLHA DA CATEGORIA DO CARDÁPIO ----
         case 'waiting_category': {
             const categorias = db.getCategorias(true);
@@ -127,7 +187,6 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
             if (numOpcao !== null && numOpcao >= 1 && numOpcao <= categorias.length) {
                 categoriaEscolhida = categorias[numOpcao - 1];
             } else {
-                // Tenta casar por nome aproximado
                 categoriaEscolhida = categorias.find(c => mensagemLower.includes(c.id.toLowerCase()) || mensagemLower.includes(c.nome.toLowerCase()));
             }
 
@@ -241,10 +300,8 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
             const primeiroSabor = estado.primeiroSabor;
 
             if (numOpcao === 1 || mensagemLower.includes('inteira') || mensagemLower === '1') {
-                // Pizza Inteira de 1 sabor só
                 return await avancarParaBordasPizza(responder, from, estado, config, primeiroSabor);
             } else if (numOpcao === 2 || mensagemLower.includes('meio') || mensagemLower.includes('2') || mensagemLower.includes('segundo')) {
-                // Pizza Meio a Meio -> Lista os sabores de pizza para escolher o 2º
                 const todasPizzas = db.getCardapio({ categoria: 'pizza' });
                 db.setEstadoConversa(from, {
                     ...estado,
@@ -283,7 +340,6 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
             const sabor1 = estado.primeiroSabor;
             const sabor2 = todasPizzas[index];
 
-            // 🍕 REGRA DE OURO: O valor total da pizza é sempre o maior entre os 2 sabores
             const precoFinalPizza = Math.max(Number(sabor1.preco), Number(sabor2.preco));
 
             const nomeS1 = sabor1.nome.replace(/^Pizza\s+/i, '');
@@ -494,9 +550,9 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
         // ---- ETAPA 7: FORMA DE PAGAMENTO ----
         case 'waiting_payment_method': {
             if (numOpcao === 1 || mensagemLower.includes('pix')) {
-                return await finalizarEConfirmarPedido({ responder, from, nomeCliente, estado, config, formaPagamento: 'PIX', trocoPara: null, emitEvent, notificarDono });
+                return await finalizarEConfirmarPedido({ responder, from, nomeCliente, estado, config, formaPagamento: 'PIX', trocoPara: null, emitEvent, notificarDono, terms });
             } else if (numOpcao === 2 || mensagemLower.includes('cartao') || mensagemLower.includes('cartão')) {
-                return await finalizarEConfirmarPedido({ responder, from, nomeCliente, estado, config, formaPagamento: 'Cartão (Maquininha na Entrega)', trocoPara: null, emitEvent, notificarDono });
+                return await finalizarEConfirmarPedido({ responder, from, nomeCliente, estado, config, formaPagamento: 'Cartão (Maquininha na Entrega)', trocoPara: null, emitEvent, notificarDono, terms });
             } else if (numOpcao === 3 || mensagemLower.includes('dinheiro')) {
                 db.setEstadoConversa(from, {
                     ...estado,
@@ -533,7 +589,8 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
                 formaPagamento: 'Dinheiro',
                 trocoPara,
                 emitEvent,
-                notificarDono
+                notificarDono,
+                terms
             });
         }
 
@@ -574,8 +631,499 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
 
         default:
             db.limparEstadoConversa(from);
-            return await enviarMenuPrincipal(responder, nomeCliente, config);
+            return await enviarMenuPrincipal(responder, nomeCliente, config, terms);
     }
+}
+
+// =====================================================================
+// FLUXO APPOINTMENT — Barbearia/Clínica/PetShop/Salão
+// (serviço → profissional → data → horário → confirmação)
+// =====================================================================
+async function processarFluxoAppointment({ responder, from, nomeCliente, estado, config, mensagens, terms, numOpcao, mensagemLimpa, mensagemLower, emitEvent, notificarDono, niche }) {
+    switch (estado.status) {
+
+        // ---- ETAPA 1: ESCOLHA DO SERVIÇO ----
+        case 'waiting_service': {
+            const servicos = db.getCardapio({ apenasAtivos: true });
+            let servicoEscolhido = null;
+
+            if (numOpcao !== null && numOpcao >= 1 && numOpcao <= servicos.length) {
+                servicoEscolhido = servicos[numOpcao - 1];
+            } else {
+                servicoEscolhido = servicos.find(s => mensagemLower.includes(s.nome.toLowerCase()));
+            }
+
+            if (!servicoEscolhido) {
+                let listaServicos = servicos.map((s, i) => `${i + 1}. ${s.icone || '✂️'} *${s.nome}* — ${formatarMoeda(s.preco)}`).join('\n');
+                return await responder(
+                    `⚠️ Opção inválida. Escolha um serviço:\n\n${listaServicos}\n\n_Ou envie *MENU* para voltar.`
+                );
+            }
+
+            db.setEstadoConversa(from, {
+                ...estado,
+                status: 'waiting_professional',
+                servico: servicoEscolhido
+            });
+
+            // Lista de profissionais (genérico — pode ser customizado por nicho no futuro)
+            const profissionais = getProfissionais(niche);
+            let listaProfissionais = profissionais.map((p, i) => `${i + 1}. ${p.emoji || '👤'} *${p.nome}* — _${p.especialidade}_`).join('\n');
+
+            return await responder(
+                `${servicoEscolhido.icone || '✂️'} *${servicoEscolhido.nome}* — ${formatarMoeda(servicoEscolhido.preco)}\n\n` +
+                `👤 *Escolha o profissional:*\n\n${listaProfissionais}\n\n` +
+                `_Digite o número ou envie *MENU* para voltar._`
+            );
+        }
+
+        // ---- ETAPA 2: ESCOLHA DO PROFISSIONAL ----
+        case 'waiting_professional': {
+            const profissionais = getProfissionais(niche);
+            let profissionalEscolhido = null;
+
+            if (numOpcao !== null && numOpcao >= 1 && numOpcao <= profissionais.length) {
+                profissionalEscolhido = profissionais[numOpcao - 1];
+            } else {
+                profissionalEscolhido = profissionais.find(p => mensagemLower.includes(p.nome.toLowerCase()));
+            }
+
+            if (!profissionalEscolhido) {
+                let listaProfissionais = profissionais.map((p, i) => `${i + 1}. ${p.emoji || '👤'} *${p.nome}*`).join('\n');
+                return await responder(`⚠️ Profissional não encontrado. Escolha:\n\n${listaProfissionais}`);
+            }
+
+            const dias = getProximosDias();
+            db.setEstadoConversa(from, {
+                ...estado,
+                status: 'waiting_date',
+                profissional: profissionalEscolhido,
+                diasDisponiveis: dias
+            });
+
+            let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
+            return await responder(
+                `👤 Profissional escolhido: *${profissionalEscolhido.nome}* (${profissionalEscolhido.especialidade})\n\n` +
+                `📅 *Escolha a data:*\n\n${listaDias}\n\n` +
+                `_Digite o número do dia desejado:_`
+            );
+        }
+
+        // ---- ETAPA 3: ESCOLHA DA DATA ----
+        case 'waiting_date': {
+            const dias = estado.diasDisponiveis || getProximosDias();
+            let dataEscolhida = null;
+
+            if (numOpcao !== null && numOpcao >= 1 && numOpcao <= dias.length) {
+                dataEscolhida = dias[numOpcao - 1];
+            }
+
+            if (!dataEscolhida) {
+                let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
+                return await responder(`⚠️ Dia inválido. Escolha:\n\n${listaDias}`);
+            }
+
+            const horarios = getHorariosDisponiveis();
+            db.setEstadoConversa(from, {
+                ...estado,
+                status: 'waiting_time',
+                data: dataEscolhida,
+                horariosDisponiveis: horarios
+            });
+
+            let listaHorarios = horarios.map((h, i) => `${i + 1}. 🕐 ${h}`).join('\n');
+            return await responder(
+                `📅 Data: *${dataEscolhida.label}*\n\n` +
+                `⏰ *Escolha o horário:*\n\n${listaHorarios}\n\n` +
+                `_Digite o número do horário desejado:_`
+            );
+        }
+
+        // ---- ETAPA 4: ESCOLHA DO HORÁRIO ----
+        case 'waiting_time': {
+            const horarios = estado.horariosDisponiveis || getHorariosDisponiveis();
+            let horarioEscolhido = null;
+
+            if (numOpcao !== null && numOpcao >= 1 && numOpcao <= horarios.length) {
+                horarioEscolhido = horarios[numOpcao - 1];
+            } else {
+                const match = mensagemLimpa.match(/^(\d{1,2})[:h]?(\d{0,2})/);
+                if (match) {
+                    const hStr = `${match[1].padStart(2, '0')}:${(match[2] || '00').padStart(2, '0')}`;
+                    horarioEscolhido = horarios.find(h => h === hStr);
+                }
+            }
+
+            if (!horarioEscolhido) {
+                let listaHorarios = horarios.map((h, i) => `${i + 1}. 🕐 ${h}`).join('\n');
+                return await responder(`⚠️ Horário inválido. Escolha:\n\n${listaHorarios}`);
+            }
+
+            db.setEstadoConversa(from, {
+                ...estado,
+                status: 'waiting_confirmation',
+                horario: horarioEscolhido
+            });
+
+            const { servico, profissional, data } = estado;
+            return await responder(
+                `✅ *Resumo do Agendamento:*\n\n` +
+                `${servico.icone || '✂️'} Serviço: *${servico.nome}*\n` +
+                `👤 Profissional: *${profissional.nome}*\n` +
+                `📅 Data: *${data.label}*\n` +
+                `⏰ Horário: *${horarioEscolhido}*\n` +
+                `💰 Valor: *${formatarMoeda(servico.preco)}*\n\n` +
+                `━━━━━━━━━━━━━━━━━━━━\n` +
+                `*1.* ✅ Confirmar Agendamento\n` +
+                `*2.* ❌ Cancelar\n\n` +
+                `_Digite 1 para confirmar ou 2 para cancelar._`
+            );
+        }
+
+        // ---- ETAPA 5: CONFIRMAÇÃO FINAL ----
+        case 'waiting_confirmation': {
+            if (numOpcao === 2 || mensagemLower.includes('cancel') || mensagemLower.includes('não') || mensagemLower === 'nao') {
+                db.limparEstadoConversa(from);
+                return await responder(`❌ Agendamento cancelado. Quando quiser marcar, é só enviar *oi*!`);
+            }
+
+            if (numOpcao === 1 || mensagemLower.includes('confirm') || mensagemLower.includes('sim') || mensagemLower.includes('ok')) {
+                const { servico, profissional, data, horario } = estado;
+                db.limparEstadoConversa(from);
+
+                const resultado = await salvarAgendamento({
+                    telefone: from,
+                    nome: nomeCliente,
+                    servico,
+                    profissional,
+                    data,
+                    horario,
+                    preco: servico.preco,
+                    niche
+                });
+
+                const codigo = resultado?.codigo || `AGD-${Date.now()}`;
+
+                await notificarDono(
+                    `🔔 *Novo Agendamento!*\n\n` +
+                    `👤 Cliente: ${nomeCliente}\n` +
+                    `📱 Tel: ${from.replace('@c.us', '')}\n` +
+                    `${servico.icone || '✂️'} Serviço: ${servico.nome}\n` +
+                    `👤 Profissional: ${profissional.nome}\n` +
+                    `📅 Data: ${data.label} às ${horario}\n` +
+                    `💰 Valor: ${formatarMoeda(servico.preco)}\n` +
+                    `🔖 Código: ${codigo}`
+                );
+
+                return await responder(
+                    `🎉 *Agendamento Confirmado!*\n\n` +
+                    `${servico.icone || '✂️'} *${servico.nome}*\n` +
+                    `👤 Profissional: *${profissional.nome}*\n` +
+                    `📅 *${data.label}* às *${horario}*\n` +
+                    `💰 Valor: *${formatarMoeda(servico.preco)}*\n\n` +
+                    `🔖 Código: *${codigo}*\n\n` +
+                    `━━━━━━━━━━━━━━━━━━━━\n` +
+                    `📍 Apareça com 5 minutos de antecedência.\n` +
+                    `⚠️ Cancelamentos com menos de 2h de antecedência podem ser cobrados.\n\n` +
+                    `_Obrigado, ${nomeCliente}_`
+                );
+            }
+
+            return await responder(
+                `Por favor, confirme:\n\n*1.* ✅ Confirmar\n*2.* ❌ Cancelar`
+            );
+        }
+
+        default:
+            db.limparEstadoConversa(from);
+            return await enviarMenuPrincipal(responder, nomeCliente, config, terms);
+    }
+}
+
+// =====================================================================
+// HELPERS DO FLUXO APPOINTMENT
+// =====================================================================
+
+// Profissionais por nicho (pode ser customizado no futuro via Supabase)
+function getProfissionais(niche) {
+    const profissionaisPorNiche = {
+        barbershop: [
+            { id: 1, nome: 'Carlos', emoji: '💈', especialidade: 'Corte Degradê' },
+            { id: 2, nome: 'Ricardo', emoji: '✂️', especialidade: 'Barba & Acabamento' },
+            { id: 3, nome: 'Felipe', emoji: '🎨', especialidade: 'Pigmentação & Coloração' }
+        ],
+        clinic: [
+            { id: 1, nome: 'Dr. Silva', emoji: '🩺', especialidade: 'Clínico Geral' },
+            { id: 2, nome: 'Dra. Souza', emoji: '👩‍⚕️', especialidade: 'Dermatologia' },
+            { id: 3, nome: 'Dr. Lima', emoji: '👨‍⚕️', especialidade: 'Pediatria' }
+        ],
+        petshop: [
+            { id: 1, nome: 'Ana', emoji: '🐾', especialidade: 'Banho & Tosa' },
+            { id: 2, nome: 'Pedro', emoji: '✂️', especialidade: 'Tosa Higiênica' },
+            { id: 3, nome: 'Lucia', emoji: '💅', especialidade: 'Estética Animal' }
+        ],
+        salon: [
+            { id: 1, nome: 'Mariana', emoji: '💅', especialidade: 'Corte & Coloração' },
+            { id: 2, nome: 'Juliana', emoji: '✨', especialidade: 'Manicure & Pedicure' },
+            { id: 3, nome: 'Camila', emoji: '💇‍♀️', especialidade: 'Penteados' }
+        ]
+    };
+    return profissionaisPorNiche[niche] || profissionaisPorNiche['barbershop'];
+}
+
+// Próximos 7 dias úteis disponíveis (sem domingo)
+function getProximosDias() {
+    const dias = [];
+    const hoje = new Date();
+    let i = 0;
+    while (dias.length < 7) {
+        i++;
+        const d = new Date(hoje);
+        d.setDate(hoje.getDate() + i);
+        const dow = d.getDay();
+        if (dow !== 0) {
+            const dd = String(d.getDate()).padStart(2, '0');
+            const mm = String(d.getMonth() + 1).padStart(2, '0');
+            const yyyy = d.getFullYear();
+            const label = dow === 6 ? 'Sábado' : ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'][dow];
+            dias.push({ iso: `${yyyy}-${mm}-${dd}`, label: `${label} ${dd}/${mm}` });
+        }
+    }
+    return dias;
+}
+
+// Horários disponíveis (pode ser customizado por nicho no futuro)
+function getHorariosDisponiveis() {
+    return ['09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
+            '13:30', '14:00', '14:30', '15:00', '15:30', '16:00',
+            '16:30', '17:00', '17:30', '18:00', '18:30', '19:00'];
+}
+
+// Salva o agendamento na tabela `pedidos` com metadata.tipo = niche
+async function salvarAgendamento({ telefone, nome, servico, profissional, data, horario, preco, niche }) {
+    const config = db.getConfig();
+    const codigo = `AGD-${Date.now().toString(36).toUpperCase()}`;
+    const hoje = new Date().toISOString().split('T')[0];
+    const horaBr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+    const resultado = db.criarPedido({
+        cliente: nome,
+        telefone: telefone,
+        itens: [{
+            id: servico.id,
+            nome: `${servico.icone || '✂️'} ${servico.nome} c/ ${profissional.nome}`,
+            preco: preco,
+            qtd: 1,
+            observacao: `Agendamento: ${data.label} às ${horario}`,
+            totalItem: preco
+        }],
+        tipoEntrega: 'agendamento',
+        enderecoEntrega: '',
+        formaPagamento: 'a_confirmar',
+        taxaEntrega: 0,
+        origem: 'whatsapp',
+        observacoes: JSON.stringify({
+            tipo: niche,
+            servico_id: servico.id,
+            profissional_id: profissional.id,
+            profissional_nome: profissional.nome,
+            data_agendada: data.iso,
+            horario_agendado: horario
+        })
+    });
+
+    if (resultado.success) {
+        return { codigo, id: resultado.pedido.id };
+    }
+    return { codigo, id: null };
+}
+
+// =====================================================================
+// MENUS E HELPERS GERAIS
+// =====================================================================
+
+async function enviarMenuPrincipal(responder, nomeCliente, config, terms) {
+    const mensagens = config.mensagens || {};
+    const fechadoHoje = db.isFechadoHoje();
+    let avisoFechado = '';
+    if (fechadoHoje) {
+        avisoFechado = formatarTexto(mensagens.fechadoAviso || `\n🛑 *AVISO:* O estabelecimento está fechado hoje ({motivo}).\n`, {
+            motivo: config.motivoFechado || 'Recesso/Descanso'
+        });
+    }
+
+    const turno = db.getTurnoAtual();
+    let avisoTurno = `⏰ *Agora:* ${turno.icone} ${turno.nome} — _${turno.descricao}_\n`;
+
+    const textoMenu = formatarTexto(mensagens.menuPrincipal || `🍽️ *BEM-VINDO AO {restaurante}* 🍽️\n\nOlá, *{nome}*!\n\n{avisoTurno}\n{avisoFechado}\n1️⃣ 🛒 *Fazer Pedido*\n2️⃣ 📋 *Ver Cardápio*\n3️⃣ 🛵 *Status do Pedido*\n4️⃣ 📍 *Informações & Horários*\n5️⃣ ❌ *Cancelar Pedido*\n\n👉 _Digite o número da opção desejada:_`, {
+        restaurante: config.nomeRestaurante.toUpperCase(),
+        nome: nomeCliente,
+        avisoTurno: avisoTurno,
+        avisoFechado: avisoFechado
+    });
+
+    return await responder(textoMenu);
+}
+
+async function iniciarFluxoPedido(responder, from, config, terms) {
+    const mensagens = config.mensagens || {};
+    db.setEstadoConversa(from, {
+        status: 'waiting_category',
+        carrinho: []
+    });
+
+    const categorias = db.getCategorias(true);
+    let listaCats = categorias.map((c, i) => `${i + 1}. ${c.icone || '🍽️'} *${c.nome}*`).join('\n');
+
+    return await responder(
+        formatarTexto(mensagens.escolhaCategoria || `🛒 *FAZER PEDIDO — {restaurante}* 🍽️\n\nEscolha a categoria desejada:\n\n{listaCategorias}\n\n_Digite o número desejado:_`, {
+            restaurante: config.nomeRestaurante.toUpperCase(),
+            listaCategorias: listaCats
+        })
+    );
+}
+
+async function iniciarFluxoAgendamento(responder, from, config, terms) {
+    const mensagens = config.mensagens || {};
+    db.setEstadoConversa(from, {
+        status: 'waiting_service',
+        agendamento: {}
+    });
+
+    const servicos = db.getCardapio({ apenasAtivos: true });
+    let listaServicos = servicos.map((s, i) => `${i + 1}. ${s.icone || '✂️'} *${s.nome}* — ${formatarMoeda(s.preco)}`).join('\n');
+
+    return await responder(
+        `✂️ *${config.nomeRestaurante}*\n` +
+        `Olá! Escolha o serviço desejado:\n\n${listaServicos}\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `👉 Digite o *número* do serviço para agendar!\n\n` +
+        `_Ou envie *MENU* para voltar._`
+    );
+}
+
+async function enviarCardapioCompleto(responder, config, terms) {
+    const cardapio = db.getCardapio();
+    const categorias = db.getCategorias(true);
+
+    let texto = `📜 *CARDÁPIO COMPLETO — ${config.nomeRestaurante.toUpperCase()}*\n\n`;
+
+    for (const cat of categorias) {
+        const itensCat = cardapio.filter(i => i.categoria === cat.id);
+        if (itensCat.length > 0) {
+            texto += `${cat.icone || '🍽️'} *${cat.nome.toUpperCase()}*\n`;
+            texto += itensCat.map(it => `• *${it.nome}* — ${formatarMoeda(it.preco)}\n  _${it.descricao || ''}_`).join('\n');
+            texto += `\n\n`;
+        }
+    }
+
+    texto += `━━━━━━━━━━━━━━━━━━━━\n` +
+        `🛵 *Taxa de Entrega Padrão:* ${formatarMoeda(config.taxaEntregaPadrao || 5.00)}\n` +
+        `💳 *Pagamento:* PIX, Cartão e Dinheiro\n\n` +
+        `_Envie *1* para fazer seu pedido agora mesmo!_`;
+
+    return await responder(texto);
+}
+
+async function consultarStatusPedido(responder, from, nomeCliente, config, terms) {
+    const pedidos = db.getPedidosCliente(from);
+
+    if (pedidos.length === 0) {
+        db.limparEstadoConversa(from);
+        return await responder(
+            `📋 Olá, *${nomeCliente}*!\n\n` +
+            `Você não possui nenhum pedido em andamento no momento.\n\n` +
+            `Deseja fazer um pedido delicioso agora? Envie *1* para pedir!`
+        );
+    }
+
+    const mapaStatus = terms.status || {};
+
+    let lista = pedidos.map(p => {
+        const statusTexto = mapaStatus[p.status] || p.status;
+        const tipoTxt = p.tipoEntrega === 'delivery' ? '🛵 Delivery' : '🛍️ Retirada';
+        return `🎫 *Pedido ${p.codigo}*\n` +
+            `🍽️ *Itens:* ${p.servico}\n` +
+            `💰 *Total:* ${formatarMoeda(p.total)} (${tipoTxt})\n` +
+            `⏳ *Previsão:* ${p.tempoEstimado}\n` +
+            `📍 *Status:* ${statusTexto}\n`;
+    }).join('\n━━━━━━━━━━━━━━━━━━━━\n\n');
+
+    return await responder(
+        `🛵 *STATUS DOS SEUS PEDIDOS:*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `${lista}\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `_Qualquer dúvida ou alteração, nossa equipe está à disposição!_`
+    );
+}
+
+async function processarFluxoCancelamento(responder, from, nomeCliente, config, terms, emitEvent, notificarDono) {
+    const mensagens = config.mensagens || {};
+    const pedidos = db.getPedidosCliente(from);
+
+    if (pedidos.length === 0) {
+        db.limparEstadoConversa(from);
+        return await responder(
+            `📋 Olá, *${nomeCliente}*!\n\n` +
+            `Você não possui pedidos ativos para cancelar no momento.\n\n` +
+            `Envie *1* se desejar fazer um novo pedido.`
+        );
+    }
+
+    if (pedidos.length === 1) {
+        const ped = pedidos[0];
+        const res = db.cancelarPedido(ped.id, from);
+        db.limparEstadoConversa(from);
+
+        if (res.success) {
+            if (emitEvent) emitEvent('agendamento_cancelado', res.pedido);
+            await notificarDono(
+                `⚠️ *PEDIDO CANCELADO PELO CLIENTE*\n\n` +
+                `🎫 *Código:* ${ped.codigo}\n` +
+                `👤 *Cliente:* ${ped.cliente}\n` +
+                `🍽️ *Itens:* ${ped.servico}\n` +
+                `💰 *Valor:* ${formatarMoeda(ped.total)}`
+            );
+
+            return await responder(
+                formatarTexto(mensagens.pedidoCancelado || `✅ Seu pedido *{codigo}* foi cancelado com sucesso!\n\nCaso queira fazer um novo pedido, envie *MENU*.`, {
+                    codigo: ped.codigo
+                })
+            );
+        } else {
+            return await responder(`⚠️ ${res.error || 'Não foi possível cancelar o pedido.'}`);
+        }
+    }
+
+    db.setEstadoConversa(from, { status: 'waiting_cancel_order_selection' });
+    let lista = pedidos.map((p, i) => `${i + 1}. *Pedido ${p.codigo}* — ${p.servico} (${formatarMoeda(p.total)})`).join('\n');
+
+    return await responder(
+        `📋 *SEUS PEDIDOS ATIVOS:*\n\n` +
+        `${lista}\n\n` +
+        `_Digite o número do pedido que deseja cancelar (ou envie *MENU* para voltar):_`
+    );
+}
+
+async function enviarInfoEstabelecimento(responder, config, terms) {
+    const mensagens = config.mensagens || {};
+    const fechadoHoje = db.isFechadoHoje();
+    let statusHoje = fechadoHoje
+        ? `🛑 *Hoje:* Fechado (${config.motivoFechado || 'Recesso'})`
+        : `🟢 *Hoje:* Aberto para Almoço e Jantar`;
+
+    const textoInfo = formatarTexto(mensagens.infoRestaurante || `📍 *INFORMAÇÕES & ATENDIMENTO — {restaurante}* 🍽️\n\n🏠 *Endereço:* {endereco}\n🍱 *Almoço:* {horarioAlmoco}\n🍕 *Jantar:* {horarioJantar}\n🛵 *Taxa:* {taxa}\n🔑 *PIX:* \`{pix}\`\n📅 *Status:* {statusHoje}\n📱 *Contato:* {telefoneDono}\n\n_Envie *1* para fazer seu pedido!_`, {
+        restaurante: config.nomeRestaurante.toUpperCase(),
+        endereco: config.endereco,
+        horarioAlmoco: config.horarioAlmoco || '11:00 às 15:00',
+        horarioJantar: config.horarioJantar || '18:00 às 23:30',
+        taxa: formatarMoeda(config.taxaEntregaPadrao || 5.00),
+        pix: config.chavePix || 'Não informada',
+        statusHoje: statusHoje,
+        telefoneDono: config.numeroDono ? config.numeroDono.replace('@c.us', '') : ''
+    });
+
+    return await responder(textoInfo);
 }
 
 // Helper para avançar para a etapa de bordas / quantidade da pizza
@@ -623,7 +1171,7 @@ async function avancarParaBordasPizza(responder, from, estado, config, itemEmEdi
 // ---------------------------------------------------------------------
 // Finalização e Criação do Pedido
 // ---------------------------------------------------------------------
-async function finalizarEConfirmarPedido({ responder, from, nomeCliente, estado, config, formaPagamento, trocoPara, emitEvent, notificarDono }) {
+async function finalizarEConfirmarPedido({ responder, from, nomeCliente, estado, config, formaPagamento, trocoPara, emitEvent, notificarDono, terms }) {
     const mensagens = config.mensagens || {};
     const carrinho = estado.carrinho || [];
     if (carrinho.length === 0) {
@@ -632,7 +1180,7 @@ async function finalizarEConfirmarPedido({ responder, from, nomeCliente, estado,
     }
 
     const taxa = estado.tipoEntrega === 'delivery' ? (Number(estado.taxaEntrega) || Number(config.taxaEntregaPadrao) || 5.00) : 0;
-    
+
     const resultado = db.criarPedido({
         cliente: nomeCliente,
         telefone: from,
@@ -663,7 +1211,7 @@ async function finalizarEConfirmarPedido({ responder, from, nomeCliente, estado,
         return `• ${i.qtd}x ${i.nome}${obs} = ${formatarMoeda(i.total)}`;
     }).join('\n');
 
-    let entregaInfoDono = ped.tipoEntrega === 'delivery' 
+    let entregaInfoDono = ped.tipoEntrega === 'delivery'
         ? `🛵 *DELIVERY:* ${ped.enderecoEntrega}`
         : `🛍️ *RETIRADA NO BALCÃO*`;
 
@@ -719,180 +1267,8 @@ async function finalizarEConfirmarPedido({ responder, from, nomeCliente, estado,
     return await responder(msgCliente);
 }
 
-// ---------------------------------------------------------------------
-// Menus e Helpers
-// ---------------------------------------------------------------------
-async function enviarMenuPrincipal(responder, nomeCliente, config) {
-    const mensagens = config.mensagens || {};
-    const fechadoHoje = db.isFechadoHoje();
-    let avisoFechado = '';
-    if (fechadoHoje) {
-        avisoFechado = formatarTexto(mensagens.fechadoAviso || `\n🛑 *AVISO:* O restaurante está fechado hoje ({motivo}).\n`, {
-            motivo: config.motivoFechado || 'Recesso/Descanso'
-        });
-    }
-
-    const turno = db.getTurnoAtual();
-    let avisoTurno = `⏰ *Agora:* ${turno.icone} ${turno.nome} — _${turno.descricao}_\n`;
-
-    const textoMenu = formatarTexto(mensagens.menuPrincipal || `🍽️ *BEM-VINDO AO {restaurante}* 🍽️\n\nOlá, *{nome}*!\n\n{avisoTurno}\n{avisoFechado}\n1️⃣ 🛒 *Fazer Pedido*\n2️⃣ 📋 *Ver Cardápio*\n3️⃣ 🛵 *Status do Pedido*\n4️⃣ 📍 *Informações & Horários*\n5️⃣ ❌ *Cancelar Pedido*\n\n👉 _Digite o número da opção desejada:_`, {
-        restaurante: config.nomeRestaurante.toUpperCase(),
-        nome: nomeCliente,
-        avisoTurno: avisoTurno,
-        avisoFechado: avisoFechado
-    });
-
-    return await responder(textoMenu);
-}
-
-async function iniciarFluxoPedido(responder, from, config) {
-    const mensagens = config.mensagens || {};
-    db.setEstadoConversa(from, {
-        status: 'waiting_category',
-        carrinho: []
-    });
-
-    const categorias = db.getCategorias(true);
-    let listaCats = categorias.map((c, i) => `${i + 1}. ${c.icone || '🍽️'} *${c.nome}*`).join('\n');
-
-    return await responder(
-        formatarTexto(mensagens.escolhaCategoria || `🛒 *FAZER PEDIDO — {restaurante}* 🍽️\n\nEscolha a categoria desejada:\n\n{listaCategorias}\n\n_Digite o número desejado:_`, {
-            restaurante: config.nomeRestaurante.toUpperCase(),
-            listaCategorias: listaCats
-        })
-    );
-}
-
-async function enviarCardapioCompleto(responder, config) {
-    const cardapio = db.getCardapio();
-    const categorias = db.getCategorias(true);
-
-    let texto = `📜 *CARDÁPIO COMPLETO — ${config.nomeRestaurante.toUpperCase()}*\n\n`;
-
-    for (const cat of categorias) {
-        const itensCat = cardapio.filter(i => i.categoria === cat.id);
-        if (itensCat.length > 0) {
-            texto += `${cat.icone || '🍽️'} *${cat.nome.toUpperCase()}*\n`;
-            texto += itensCat.map(it => `• *${it.nome}* — ${formatarMoeda(it.preco)}\n  _${it.descricao || ''}_`).join('\n');
-            texto += `\n\n`;
-        }
-    }
-
-    texto += `━━━━━━━━━━━━━━━━━━━━\n` +
-        `🛵 *Taxa de Entrega Padrão:* ${formatarMoeda(config.taxaEntregaPadrao || 5.00)}\n` +
-        `💳 *Pagamento:* PIX, Cartão e Dinheiro\n\n` +
-        `_Envie *1* para fazer seu pedido agora mesmo!_`;
-
-    return await responder(texto);
-}
-
-async function consultarStatusPedido(responder, from, nomeCliente, config) {
-    const pedidos = db.getPedidosCliente(from);
-
-    if (pedidos.length === 0) {
-        db.limparEstadoConversa(from);
-        return await responder(
-            `📋 Olá, *${nomeCliente}*!\n\n` +
-            `Você não possui nenhum pedido em andamento no momento.\n\n` +
-            `Deseja fazer um pedido delicioso agora? Envie *1* para pedir!`
-        );
-    }
-
-    const mapaStatus = {
-        'pendente': '🟡 *Recebido na Cozinha* (Aguardando forno/fogão)',
-        'em_preparo': '👨‍🍳 *Em Preparo* (No fogo/forno com todo capricho!)',
-        'saiu_entrega': '🛵 *Saiu para Entrega / Pronto para Retirada* (A caminho!)',
-        'concluido': '✅ *Entregue / Concluído*',
-        'cancelado': '❌ *Cancelado*'
-    };
-
-    let lista = pedidos.map(p => {
-        const statusTexto = mapaStatus[p.status] || p.status;
-        const tipoTxt = p.tipoEntrega === 'delivery' ? '🛵 Delivery' : '🛍️ Retirada';
-        return `🎫 *Pedido ${p.codigo}*\n` +
-            `🍽️ *Itens:* ${p.servico}\n` +
-            `💰 *Total:* ${formatarMoeda(p.total)} (${tipoTxt})\n` +
-            `⏳ *Previsão:* ${p.tempoEstimado}\n` +
-            `📍 *Status:* ${statusTexto}\n`;
-    }).join('\n━━━━━━━━━━━━━━━━━━━━\n\n');
-
-    return await responder(
-        `🛵 *STATUS DOS SEUS PEDIDOS:*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
-        `${lista}\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `_Qualquer dúvida ou alteração, nossa equipe está à disposição!_`
-    );
-}
-
-async function processarFluxoCancelamento(responder, from, nomeCliente, config, emitEvent, notificarDono) {
-    const mensagens = config.mensagens || {};
-    const pedidos = db.getPedidosCliente(from);
-
-    if (pedidos.length === 0) {
-        db.limparEstadoConversa(from);
-        return await responder(
-            `📋 Olá, *${nomeCliente}*!\n\n` +
-            `Você não possui pedidos ativos para cancelar no momento.\n\n` +
-            `Envie *1* se desejar fazer um novo pedido.`
-        );
-    }
-
-    if (pedidos.length === 1) {
-        const ped = pedidos[0];
-        const res = db.cancelarPedido(ped.id, from);
-        db.limparEstadoConversa(from);
-
-        if (res.success) {
-            if (emitEvent) emitEvent('agendamento_cancelado', res.pedido);
-            await notificarDono(
-                `⚠️ *PEDIDO CANCELADO PELO CLIENTE*\n\n` +
-                `🎫 *Código:* ${ped.codigo}\n` +
-                `👤 *Cliente:* ${ped.cliente}\n` +
-                `🍽️ *Itens:* ${ped.servico}\n` +
-                `💰 *Valor:* ${formatarMoeda(ped.total)}`
-            );
-
-            return await responder(
-                formatarTexto(mensagens.pedidoCancelado || `✅ Seu pedido *{codigo}* foi cancelado com sucesso!\n\nCaso queira fazer um novo pedido, envie *MENU*.`, {
-                    codigo: ped.codigo
-                })
-            );
-        } else {
-            return await responder(`⚠️ ${res.error || 'Não foi possível cancelar o pedido.'}`);
-        }
-    }
-
-    db.setEstadoConversa(from, { status: 'waiting_cancel_order_selection' });
-    let lista = pedidos.map((p, i) => `${i + 1}. *Pedido ${p.codigo}* — ${p.servico} (${formatarMoeda(p.total)})`).join('\n');
-
-    return await responder(
-        `📋 *SEUS PEDIDOS ATIVOS:*\n\n` +
-        `${lista}\n\n` +
-        `_Digite o número do pedido que deseja cancelar (ou envie *MENU* para voltar):_`
-    );
-}
-
-async function enviarInfoRestaurante(responder, config) {
-    const mensagens = config.mensagens || {};
-    const fechadoHoje = db.isFechadoHoje();
-    let statusHoje = fechadoHoje 
-        ? `🛑 *Hoje:* Fechado (${config.motivoFechado || 'Recesso'})`
-        : `🟢 *Hoje:* Aberto para Almoço e Jantar`;
-
-    const textoInfo = formatarTexto(mensagens.infoRestaurante || `📍 *INFORMAÇÕES & ATENDIMENTO — {restaurante}* 🍽️\n\n🏠 *Endereço:* {endereco}\n🍱 *Almoço:* {horarioAlmoco}\n🍕 *Jantar:* {horarioJantar}\n🛵 *Taxa:* {taxa}\n🔑 *PIX:* \`{pix}\`\n📅 *Status:* {statusHoje}\n📱 *Contato:* {telefoneDono}\n\n_Envie *1* para fazer seu pedido!_`, {
-        restaurante: config.nomeRestaurante.toUpperCase(),
-        endereco: config.endereco,
-        horarioAlmoco: config.horarioAlmoco || '11:00 às 15:00',
-        horarioJantar: config.horarioJantar || '18:00 às 23:30',
-        taxa: formatarMoeda(config.taxaEntregaPadrao || 5.00),
-        pix: config.chavePix || 'Não informada',
-        statusHoje: statusHoje,
-        telefoneDono: config.numeroDono ? config.numeroDono.replace('@c.us', '') : ''
-    });
-
-    return await responder(textoInfo);
-}
-
 module.exports = {
-    processarMensagem
+    processarMensagem,
+    getNiche,
+    refreshNicheCache
 };

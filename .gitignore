@@ -2,7 +2,13 @@ node_modules/
 .env
 logs/
 .wwebjs_auth/
+.wwebjs_auth_engine1/
+.wwebjs_auth_engine2/
+.wwebjs_auth_engine3/
 .wwebjs_cache/
+cloudflare/
+agendamentos.json
 *.log
 .DS_Store
 Thumbs.db
+test-engine.js
