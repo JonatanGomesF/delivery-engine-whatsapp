@@ -4,7 +4,19 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
 const puppeteer = require('puppeteer');
-const { processarMensagem } = require('./botEngine');
+// ── Carregamento dinâmico do botEngine por nicho ─────────────────
+// Defina NICHE=barbershop, NICHE=clinic, etc. no ecosystem.config.js.
+// Sem NICHE ou NICHE=delivery → botEngine.js (padrão).
+const NICHE = (process.env.NICHE || 'delivery').toLowerCase().trim();
+const ENGINE_MAP = {
+    delivery:  './botEngine',
+    barbershop: './botEngine_barbershop',
+    clinic:    './botEngine_barbershop', // placeholder até botEngine_clinic.js existir
+    clinic:    './botEngine',
+};
+const enginePath = ENGINE_MAP[NICHE] || './botEngine';
+console.log(`💡 [ENGINE] Nicho: "${NICHE}" → carregando ${enginePath}`);
+const { processarMensagem } = require(enginePath);
 
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname, '..');
 

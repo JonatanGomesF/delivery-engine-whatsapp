@@ -52,6 +52,32 @@ module.exports = {
                 CLIENTE_ID:         'pizzaria_teste',
                 WWEBJS_AUTH_PATH:   './.wwebjs_auth_engine2'   // sessão isolada — QR próprio
             }
+        },
+
+        // ── Tenant 3: barbearia_estilo (Barbershop) ───────────────
+        {
+            name:        'engine-barbershop',
+            script:      'index.js',
+            cwd:         __dirname,
+            watch:       false,
+            autorestart: true,
+            max_restarts: 10,
+            min_uptime:  '10s',
+            restart_delay: 5000,
+            error_file:  './logs/engine3-error.log',
+            out_file:    './logs/engine3-output.log',
+            log_date_format: 'YYYY-MM-DD HH:mm:ss',
+            merge_logs:  true,
+            max_memory_restart: '800M',
+            interpreter: 'node',
+            exec_mode:   'fork',
+            env: {
+                NODE_ENV:           'production',
+                PORT:               3003,
+                CLIENTE_ID:         'barbearia_estilo',       // ← id do tenant no Supabase
+                NICHE:              'barbershop',              // ← carrega botEngine_barbershop.js
+                WWEBJS_AUTH_PATH:   './.wwebjs_auth_engine3'  // sessão WhatsApp isolada
+            }
         }
     ]
 };
