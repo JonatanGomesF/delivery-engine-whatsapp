@@ -78,6 +78,31 @@ module.exports = {
                 // NICHE não é mais necessário — o motor único lê o niche do Supabase
                 WWEBJS_AUTH_PATH:   './.wwebjs_auth_engine3'  // sessão WhatsApp isolada
             }
+        },
+
+        // ── Tenant 4: Clínica Editu2 (Clinic) ──────────────────
+        {
+            name:        'engine-clinica',
+            script:      'index.js',
+            cwd:         __dirname,
+            watch:       false,
+            autorestart: true,
+            max_restarts: 10,
+            min_uptime:  '10s',
+            restart_delay: 5000,
+            error_file:  './logs/engine4-error.log',
+            out_file:    './logs/engine4-output.log',
+            log_date_format: 'YYYY-MM-DD HH:mm:ss',
+            merge_logs:  true,
+            max_memory_restart: '800M',
+            interpreter: 'node',
+            exec_mode:   'fork',
+            env: {
+                NODE_ENV:           'production',
+                PORT:               3004,                        // ← porta única
+                CLIENTE_ID:         'climeditu2',                // ← id do tenant no Supabase
+                WWEBJS_AUTH_PATH:   './.wwebjs_auth_engine4'    // ← sessão WhatsApp isolada (QR próprio)
+            }
         }
     ]
 };
