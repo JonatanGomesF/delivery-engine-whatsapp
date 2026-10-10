@@ -1,6 +1,6 @@
-const fs = require('fs');
 const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
+const { getMensagensNicho } = require('./niches');
 
 // =====================================================================
 // Diretório base da aplicação (compatível com pkg .exe e modo dev)
@@ -11,53 +11,80 @@ const APP_DIR = process.pkg ? path.dirname(process.execPath) : path.resolve(__di
 // Credenciais do Banco Multi-Tenant (delivery_platform)
 // Definidas via variáveis de ambiente OU hardcoded aqui como fallback
 // =====================================================================
+// Preferência: chave de serviço (engine multi-tenant), com fallback para
+// a publishable key usada nas instalações standalone (pkg / painel local).
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://errczksxtizgpmjzfhnv.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || 'sb_publishable_MmLNWGDwYO0fVxVUC8lCEA_pU113fNw';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY || 'sb_publishable_MmLNWGDwYO0fVxVUC8lCEA_pU113fNw';
 
 // =====================================================================
-// Leitura do config_delivery.json — identifica o cliente desta máquina
-// Basta alterar "clienteId" e "nomeEstabelecimento" para cada cliente
+// Identidade do tenant — resolvida na seguinte ordem:
+//   1. process.env.CLIENTE_ID (PM2 / .env do ecosystem)  ← engines multi-tenant
+//   2. config_delivery.json (instalações standalone / pkg)
+// Nenhum dado de negócio é gravado em arquivo: o Supabase é a fonte.
 // =====================================================================
 const CONFIG_DELIVERY_PATH = path.join(APP_DIR, 'config_delivery.json');
-const DB_PATH               = path.join(APP_DIR, 'agendamentos.json');
 
-let CLIENTE_ID   = 'delivery_bot';
-let NOME_CLIENTE = 'Meu Delivery';
+let CLIENTE_ID    = '';
+let NOME_CLIENTE  = 'Meu Delivery';
+let NICHE_PADRAO  = 'delivery';
 
+// Helper read-only para o config de identidade (não confundir com dados locais)
+function fsReadFileJson(caminho) {
+    try {
+        const fs = require('fs');
+        if (fs.existsSync(caminho)) return JSON.parse(fs.readFileSync(caminho, 'utf8'));
+    } catch (e) {}
+    return null;
+}
+
+// 1. Ambiente (PM2 / dotenv) — prioridade máxima
+if (process.env.CLIENTE_ID) {
+    CLIENTE_ID = String(process.env.CLIENTE_ID).trim().toLowerCase().replace(/\s+/g, '_');
+}
+if (process.env.NICHE) {
+    NICHE_PADRAO = String(process.env.NICHE).trim().toLowerCase() || 'delivery';
+}
+
+// 2. config_delivery.json — fallback (quando não há CLIENTE_ID de ambiente)
 try {
-    if (fs.existsSync(CONFIG_DELIVERY_PATH)) {
-        const cfg = JSON.parse(fs.readFileSync(CONFIG_DELIVERY_PATH, 'utf8'));
-        if (cfg && cfg.clienteId)          CLIENTE_ID   = cfg.clienteId.trim().toLowerCase().replace(/\s+/g, '_');
-        if (cfg && cfg.nomeEstabelecimento) NOME_CLIENTE = cfg.nomeEstabelecimento.trim();
+    const cfg = fsReadFileJson(CONFIG_DELIVERY_PATH);
+    if (cfg) {
+        if (!CLIENTE_ID && cfg.clienteId) {
+            CLIENTE_ID = String(cfg.clienteId).trim().toLowerCase().replace(/\s+/g, '_');
+        }
+        if (cfg.nomeEstabelecimento) NOME_CLIENTE = String(cfg.nomeEstabelecimento).trim();
+        if (cfg.niche)               NICHE_PADRAO = String(cfg.niche).trim().toLowerCase() || 'delivery';
     }
 } catch (e) {
-    console.warn('⚠️ Não foi possível ler config_delivery.json. Usando padrão.');
+    console.warn('⚠️ Não foi possível ler config_delivery.json.');
 }
 
 // =====================================================================
-// TRAVA DE SEGURANÇA — impede iniciar com a configuração de exemplo
-// ainda não editada. Sem isso, cada instalação esquecida criaria um
-// registro junk na tabela `clientes` do banco compartilhado.
+// TRAVA DE SEGURANÇA — impede iniciar sem identidade de tenant definida.
+// Sem isso, cada instalação esquecida criaria um registro junk na tabela
+// `clientes` do banco compartilhado. Na engine o CLIENTE_ID vem do env
+// do PM2 (.env / ecosystem.config.js); em instalações standalone vem do
+// config_delivery.json.
 // =====================================================================
 const CONFIG_EXEMPLO = 'troque_este_campo';
-if (CLIENTE_ID === CONFIG_EXEMPLO) {
+if (!CLIENTE_ID || CLIENTE_ID === CONFIG_EXEMPLO) {
     console.error('\n' + '='.repeat(70));
-    console.error(' ERRO: o arquivo "config_delivery.json" ainda não foi editado.');
+    console.error(' ERRO: CLIENTE_ID não configurado.');
     console.error('='.repeat(70));
-    console.error(' Abra o arquivo "config_delivery.json" na pasta do DeliveryBot.exe');
-    console.error(' e preencha os dois campos obrigatórios:');
+    console.error(' Modo Engine (PM2): defina "CLIENTE_ID" no .env ou no env');
+    console.error('   de cada app do ecosystem.config.js.');
+    console.error(' Modo Standalone: abra o arquivo "config_delivery.json" e');
+    console.error('   preencha "clienteId" e "nomeEstabelecimento".');
     console.error('');
-    console.error('   "clienteId"           -> identificador único do estabelecimento');
-    console.error('                              (só letras minúsculas, números e "_")');
-    console.error('   "nomeEstabelecimento" -> nome que aparecerá no WhatsApp');
-    console.error('');
-    console.error(' Exemplo: "pizzaria_da_ana_sp" / "Pizzaria da Ana"');
+    console.error(' Exemplo: "climeditu2" / "Clínica Editu"');
     console.error('='.repeat(70) + '\n');
     process.exit(1);
 }
 
 // =====================================================================
-// Dados padrão (fallback offline)
+// Seeds de provisionamento — usados SOMENTE ao criar um cliente NOVO
+// no Supabase. Não são mais persistidos em arquivo local nem enviados
+// para a nuvem depois da criação (não sobrescrevem atualizações SaaS).
 // =====================================================================
 const DEFAULT_CATEGORIAS = [
     { id: 'marmitex', nome: 'Marmitex do Dia (Almoço)',       icone: '🍱', turno: 'dia',    ordem: 1, ativo: true },
@@ -764,30 +791,6 @@ const DEFAULT_OPCOES_BORDAS = [
     { id: 4, nome: 'Borda de Chocolate ao Leite',      preco: 10.00, ativo: true }
 ];
 
-const DEFAULT_MENSAGENS = {
-    menuPrincipal: `🍽️ *BEM-VINDO AO {restaurante}* 🍽️\n\nOlá, *{nome}*! O que você gostaria de saborear hoje?\n\n{avisoTurno}\n{avisoFechado}\n1️⃣ 🛒 *Fazer Pedido (Marmitex / Pizzas / Bebidas)*\n2️⃣ 📋 *Ver Cardápio Completo*\n3️⃣ 🛵 *Acompanhar Meu Pedido (Status)*\n4️⃣ 📍 *Horários, Endereço & Formas de Pagamento*\n5️⃣ ❌ *Cancelar Pedido*\n\n👉 _Digite o número da opção desejada (Ex: *1*):_`,
-    fechadoAviso: `🛑 *AVISO:* O restaurante está fechado hoje ({motivo}).`,
-    escolhaCategoria: `🛒 *FAZER PEDIDO — {restaurante}* 🍽️\n\nEscolha a categoria desejada:\n\n{listaCategorias}\n\n_Digite o número da categoria desejada (Ex: 1):_`,
-    escolhaItem: `{tituloCategoria}\n━━━━━━━━━━━━━━━━━━━━\n\n{listaItens}\n\n👉 *Digite o número da opção que deseja adicionar:* (Ex: 1)\n_Envie *MENU* para voltar ao início._`,
-    escolhaModoPizza: `🍕 Você escolheu: *{item}* ({preco})\n\nComo deseja montar a sua pizza?\n\n1️⃣ 🍕 *Pizza Inteira (Apenas {item})*\n2️⃣ 🌓 *Pizza Meio a Meio (Escolher 2º sabor)*\n\n_Digite *1* para Inteira ou *2* para Meio a Meio:_`,
-    escolhaSegundaMetade: `🌓 *ESCOLHA O 2º SABOR DA SUA PIZZA:*\n━━━━━━━━━━━━━━━━━━━━\n1º Sabor: *{primeiroSabor}* ({precoPrimeiro})\n━━━━━━━━━━━━━━━━━━━━\n\n{listaSabores}\n\n👉 *Digite o número do 2º sabor desejado:*\n_(O valor da pizza será calculado pelo sabor de maior valor)_`,
-    escolhaCarne: `🍱 Você escolheu: *{item}* ({preco})\n\n🥩 *Escolha a opção de carne principal:*\n\n{listaCarnes}\n\n_Digite o número da carne desejada (Ex: 1) ou digite sua preferência / observações:_`,
-    escolhaBorda: `🍕 Você escolheu: *{item}* ({preco})\n\n🧀 *Deseja adicionar Borda Recheada ou alguma observação?*\n\n{listaBordas}\n\n_Digite o número ou escreva sua observação (Ex: 'Sem cebola'):_`,
-    carrinhoResumo: `🛒 *SEU PEDIDO ATUAL:*\n━━━━━━━━━━━━━━━━━━━━\n{resumoCarrinho}\n━━━━━━━━━━━━━━━━━━━━\n💰 *Subtotal Parcial:* {subtotal}\n\n👉 *O que deseja fazer agora?*\n\n1️⃣ ➕ *Adicionar mais itens ao pedido*\n2️⃣ 🛵 *Concluir pedido e informar endereço de entrega*\n\n_Digite *1* para continuar comprando ou *2* para finalizar._`,
-    tipoEntrega: `🛵 *COMO DESEJA RECEBER SEU PEDIDO?*\n\n1️⃣ 🛵 *Delivery* (Entregar em casa / Taxa {taxa})\n2️⃣ 🛍️ *Retirada no Balcão* (Buscar no Restaurante sem taxa)\n\n_Digite *1* para Entrega ou *2* para Retirada no Restaurante:_`,
-    solicitarEndereco: `📍 *ENDEREÇO DE ENTREGA:*\n\nPor favor, digite seu endereço completo:\n_(Rua, Número, Bairro, Complemento e Ponto de Referência)_\n\n*Exemplo:* Rua das Flores, 142, Bairro Centro, Apto 23 (próximo à praça).`,
-    formaPagamento: `📍 Endereço registrado com sucesso:\n*{endereco}*\n\n💳 *Escolha a Forma de Pagamento:*\n\n1️⃣ 🔑 *PIX* (Chave instantânea)\n2️⃣ 💳 *Cartão (Maquininha na Entrega)*\n3️⃣ 💵 *Dinheiro*\n\n_Digite o número da opção (1, 2 ou 3):_`,
-    trocoDinheiro: `💵 *PAGAMENTO EM DINHEIRO:*\n\nVocê precisa de troco?\n_Digite o valor para o troco (Ex: *Troco para 50*) ou envie *NÃO* caso tenha o valor exato._`,
-    pedidoConfirmadoCliente: `🎉 *PEDIDO RECEBIDO COM SUCESSO!* 🎉\n\n🍽️ *{restaurante}*\n━━━━━━━━━━━━━━━━━━━━\n🎫 *Número do Pedido:* *{codigo}*\n👤 *Cliente:* {nome}\n{localEntrega}\n💳 *Forma de Pagamento:* {formaPagamento}\n{pixInfo}\n━━━━━━━━━━━━━━━━━━━━\n📋 *ITENS:*\n{itens}\n\n💵 *Subtotal:* {subtotal}\n{taxaInfo}💰 *TOTAL A PAGAR: {total}*\n━━━━━━━━━━━━━━━━━━━━\n⏳ *Tempo Estimado:* {tempo}\n👨‍🍳 *Status Atual:* 🟡 _Recebido na cozinha e entrando em preparo!_\n\n💡 *Dica:* A qualquer momento você pode enviar *STATUS* para acompanhar seu pedido!\n\n_Bom apetite e muito obrigado pela preferência!_ 😋🍲🍕`,
-    notificacaoCozinha: `🚨 *NOVO PEDIDO CHEGOU!* [{codigo}]\n━━━━━━━━━━━━━━━━━━━━\n👤 *Cliente:* {nome}\n📱 *WhatsApp:* {telefone}\n{localEntrega}\n💳 *Pagamento:* {formaPagamento}\n\n📝 *ITENS DO PEDIDO:*\n{itens}\n\n💵 *Subtotal:* {subtotal}\n🛵 *Taxa Entrega:* {taxa}\n💰 *TOTAL GERAL: {total}*\n━━━━━━━━━━━━━━━━━━━━\n⏰ *Hora:* {hora} | 🆔 *ID:* {id}`,
-    pedidoEmPreparo:      `👨‍🍳 *Seu pedido [{codigo}] já está no fogo/forno sendo preparado no capricho!*`,
-    pedidoSaiuEntrega:    `🛵 *Oba! Seu pedido [{codigo}] acabou de sair para entrega e está a caminho!*`,
-    pedidoProntoRetirada: `🛍️ *Seu pedido [{codigo}] está prontinho para retirada no balcão!*`,
-    pedidoConcluido:      `✅ *Pedido [{codigo}] entregue com sucesso! Bom apetite e volte sempre!* 😋❤️`,
-    pedidoCancelado:      `✅ Seu pedido *{codigo}* foi cancelado com sucesso!\n\nCaso queira fazer um novo pedido, basta enviar *MENU*.`,
-    infoRestaurante:      `📍 *INFORMAÇÕES & ATENDIMENTO — {restaurante}* 🍽️\n\n🏠 *Endereço:* {endereco}\n🍱 *Horário do Almoço (Marmitex):* {horarioAlmoco}\n🍕 *Horário da Noite (Pizzaria):* {horarioJantar}\n🛵 *Taxa de Entrega:* {taxa}\n🔑 *Chave PIX:* \`{pix}\`\n📅 *Status Hoje:* {statusHoje}\n📱 *Contato / WhatsApp:* {telefoneDono}\n\n_Envie *1* para fazer seu pedido ou *MENU* para ver as opções._`
-};
-
 const DEFAULT_CONFIG = {
     nomeRestaurante:    NOME_CLIENTE,
     nomeSalao:          NOME_CLIENTE,
@@ -808,80 +811,48 @@ const DEFAULT_CONFIG = {
     cardapio:      DEFAULT_CARDAPIO,
     opcoesCarnes:  DEFAULT_OPCOES_CARNES,
     opcoesBordas:  DEFAULT_OPCOES_BORDAS,
-    mensagens:     DEFAULT_MENSAGENS
+    mensagens:     getMensagensNicho(NICHE_PADRAO)
 };
 
 // =====================================================================
-// Cliente Supabase
+// Cliente Supabase — única fonte de verdade do sistema
 // =====================================================================
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
     auth: { persistSession: false }
 });
 
-// Cache em memória
+// Cache em memória (NÃO há mais arquivo local: agendamentos.json removido)
 let cacheLocal = {
-    config: { ...DEFAULT_CONFIG },
+    config: JSON.parse(JSON.stringify(DEFAULT_CONFIG)),
     pedidos: [],
     agendamentos: [],
-    conversa: {}
+    conversa: {},
+    niche: NICHE_PADRAO
 };
 
 // =====================================================================
-// JSON LOCAL (fallback offline)
+// "Persistência" LOCAL agora é apenas memória.
+// carregarDados/salvarDados continuam exportados para compatibilidade
+// com a API antiga, mas NÃO escrevem nada em disco.
 // =====================================================================
 function carregarDados() {
-    try {
-        if (fs.existsSync(DB_PATH)) {
-            const raw    = fs.readFileSync(DB_PATH, 'utf8');
-            const parsed = JSON.parse(raw);
-            const config = { ...DEFAULT_CONFIG, ...(parsed.config || {}) };
-
-            if (!config.cardapio      || config.cardapio.length      === 0) config.cardapio      = DEFAULT_CARDAPIO;
-            if (!config.categorias    || config.categorias.length    === 0) config.categorias    = DEFAULT_CATEGORIAS;
-            if (!config.opcoesCarnes  || config.opcoesCarnes.length  === 0) config.opcoesCarnes  = DEFAULT_OPCOES_CARNES;
-            if (!config.opcoesBordas  || config.opcoesBordas.length  === 0) config.opcoesBordas  = DEFAULT_OPCOES_BORDAS;
-
-            config.mensagens     = { ...DEFAULT_MENSAGENS, ...(config.mensagens || {}) };
-            config.nomeRestaurante = config.nomeRestaurante || NOME_CLIENTE;
-            config.nomeSalao       = config.nomeRestaurante;
-
-            const pedidos = Array.isArray(parsed.pedidos)
-                ? parsed.pedidos
-                : (Array.isArray(parsed.agendamentos) ? parsed.agendamentos : []);
-
-            cacheLocal = { config, pedidos, agendamentos: pedidos, conversa: parsed.conversa || {} };
-            return cacheLocal;
-        }
-    } catch (err) {
-        console.error('⚠️ Erro ao ler agendamentos.json:', err.message);
-    }
-
-    cacheLocal = { config: { ...DEFAULT_CONFIG }, pedidos: [], agendamentos: [], conversa: {} };
-    salvarDados(cacheLocal);
     return cacheLocal;
 }
 
 function salvarDados(data) {
-    try {
-        cacheLocal = data;
-        if (!cacheLocal.pedidos    && cacheLocal.agendamentos) cacheLocal.pedidos    = cacheLocal.agendamentos;
-        if (!cacheLocal.agendamentos && cacheLocal.pedidos)    cacheLocal.agendamentos = cacheLocal.pedidos;
-        fs.writeFileSync(DB_PATH, JSON.stringify(cacheLocal, null, 2), 'utf8');
-        return true;
-    } catch (err) {
-        console.error('❌ Erro ao salvar dados no JSON local:', err.message);
-        return false;
-    }
+    cacheLocal = data;
+    if (!cacheLocal.pedidos && cacheLocal.agendamentos) cacheLocal.pedidos = cacheLocal.agendamentos;
+    if (!cacheLocal.agendamentos && cacheLocal.pedidos) cacheLocal.agendamentos = cacheLocal.pedidos;
+    return true;
 }
 
-carregarDados();
-
 // =====================================================================
-// AUTO-PROVISIONAMENTO: cria o cliente no Supabase na 1ª execução
+// AUTO-PROVISIONAMENTO: cria o cliente no Supabase na 1ª execução.
+// IMPORTANTE (multi-tenant): se o cliente JÁ EXISTE, nada é sobrescrito.
+// O Supabase (painel SaaS) é a fonte de verdade para dados editados.
 // =====================================================================
 async function provisionarCliente() {
     try {
-        // Verifica se o cliente já existe
         const { data: existe } = await supabase
             .from('clientes')
             .select('id, nome')
@@ -889,14 +860,7 @@ async function provisionarCliente() {
             .single();
 
         if (existe) {
-            // Já existe — apenas sincroniza o nome se mudou
-            if (existe.nome !== cacheLocal.config.nomeRestaurante) {
-                await supabase
-                    .from('clientes')
-                    .update({ nome: cacheLocal.config.nomeRestaurante, updated_at: new Date().toISOString() })
-                    .eq('id', CLIENTE_ID);
-            }
-            console.log(`✅ [SUPABASE] Cliente "${CLIENTE_ID}" já cadastrado.`);
+            console.log(`✅ [SUPABASE] Cliente "${CLIENTE_ID}" já cadastrado. Nada a alterar.`);
             return true;
         }
 
@@ -904,19 +868,20 @@ async function provisionarCliente() {
         const cfg = cacheLocal.config;
         const { error } = await supabase.from('clientes').insert({
             id:                 CLIENTE_ID,
-            nome:               cfg.nomeRestaurante || NOME_CLIENTE,
-            telefone_dono:      cfg.numeroDono      || '',
-            chave_pix:          cfg.chavePix        || '',
-            endereco:           cfg.endereco        || '',
+            nome:               NOME_CLIENTE,
+            telefone_dono:      cfg.numeroDono       || '',
+            chave_pix:          cfg.chavePix         || '',
+            endereco:           cfg.endereco         || '',
             taxa_entrega:       cfg.taxaEntregaPadrao || 5.00,
             tempo_estimado_min: cfg.tempoEstimadoMin  || 30,
             tempo_estimado_max: cfg.tempoEstimadoMax  || 50,
-            horario_almoco:     cfg.horarioAlmoco   || '11:00 às 15:00',
-            horario_jantar:     cfg.horarioJantar   || '18:00 às 23:30',
+            horario_almoco:     cfg.horarioAlmoco    || '11:00 às 15:00',
+            horario_jantar:     cfg.horarioJantar    || '18:00 às 23:30',
             fechado_hoje:       false,
             motivo_fechado:     '',
             ativo:              true,
             plano:              'basico',
+            niche:              NICHE_PADRAO,
             created_at:         new Date().toISOString(),
             updated_at:         new Date().toISOString()
         });
@@ -924,11 +889,9 @@ async function provisionarCliente() {
         if (error) throw error;
         console.log(`🎉 [SUPABASE] Cliente "${CLIENTE_ID}" criado com sucesso no banco!`);
 
-        // Provisiona cardápio padrão
+        // Provisiona cardápio/categorias/opções apenas para cliente NOVO
         await provisionarCardapioPadrao();
-        // Provisiona categorias padrão
         await provisionarCategoriasPadrao();
-        // Provisiona opções extras padrão
         await provisionarOpcoesPadrao();
 
         return true;
@@ -991,61 +954,42 @@ async function provisionarOpcoesPadrao() {
 }
 
 // =====================================================================
-// SINCRONIZAÇÃO: cache local → Supabase (envia cardápio local para nuvem)
+// Leitura das mensagens do bot (CRUD relacional no Supabase):
+//   1. Base = termos do nicho (src/niches.js)
+//   2. Sobrescreve com as LINHAS da tabela mensagens_bot
+//      (id, cliente_id, chave, conteudo) filtradas por cliente_id.
+// Sem JSONs empacotados: cada mensagem é um registro individual.
+// Se o cliente não tem mensagem customizada, usa o nicho.
 // =====================================================================
-async function sincronizarCardapioParaSupabase() {
+async function carregarMensagensDoNicho(niche) {
+    const mensagens = { ...getMensagensNicho(niche) };
+
     try {
-        const cardapioLocal = cacheLocal.config.cardapio || [];
-        if (cardapioLocal.length === 0) return;
+        const { data: rowsMen } = await supabase
+            .from('mensagens_bot')
+            .select('chave, conteudo')
+            .eq('cliente_id', CLIENTE_ID);
 
-        const rows = cardapioLocal.map(item => ({
-            cliente_id: CLIENTE_ID,
-            item_id:    item.id,
-            categoria:  item.categoria,
-            nome:       item.nome,
-            descricao:  item.descricao || '',
-            preco:      item.preco,
-            turno:      item.turno || 'todos',
-            icone:      item.icone || '🍽️',
-            ativo:      item.ativo !== false,
-            ordem:      item.id
-        }));
+        (rowsMen || []).forEach(m => {
+            // Só sobrescreve com conteúdo real — linha vazia = mantém o padrão do nicho
+            if (m && m.chave && m.conteudo) mensagens[m.chave] = m.conteudo;
+        });
+    } catch (e) { /* tabela pode não existir em bancos antigos */ }
 
-        const { error } = await supabase
-            .from('cardapio')
-            .upsert(rows, { onConflict: 'cliente_id,item_id' });
-
-        if (error) {
-            console.warn('⚠️ [SUPABASE] Erro ao sincronizar cardápio:', error.message);
-        } else {
-            console.log(`📋 [SUPABASE] Cardápio sincronizado: ${rows.length} itens enviados para nuvem.`);
-        }
-
-        // Também sincroniza categorias locais
-        const categoriasLocal = cacheLocal.config.categorias || [];
-        if (categoriasLocal.length > 0) {
-            const catRows = categoriasLocal.map(cat => ({
-                cliente_id:  CLIENTE_ID,
-                categoria_id: cat.id,
-                nome:        cat.nome,
-                icone:       cat.icone || '🍽️',
-                turno:       cat.turno || 'todos',
-                ordem:       cat.ordem || 0,
-                ativo:       cat.ativo !== false
-            }));
-            await supabase.from('categorias').upsert(catRows, { onConflict: 'cliente_id,categoria_id' });
-        }
-    } catch (err) {
-        console.warn('⚠️ [SUPABASE] Falha ao sincronizar cardápio para nuvem:', err.message);
-    }
+    return mensagens;
 }
 
 // =====================================================================
-// SINCRONIZAÇÃO: Supabase → cache local (roda na inicialização e a cada 20s)
+// SINCRONIZAÇÃO: Supabase → cache (roda na inicialização e a cada 20s)
+// FLUXO 100% READ-ONLY no boot: nada do cache local é enviado de volta
+// para o banco aqui. Assim o boot NUNCA sobrescreve nem limpa registros
+// atualizados no Supabase (cardápio, categoria, opções, mensagens).
+// Escreve apenas o que é exclusivamente local (pedidos pendentes) e
+// nunca apaga o que veio da nuvem.
 // =====================================================================
 async function sincronizarComSupabase() {
     try {
-        // 1. Busca dados do cliente
+        // 1. Dados do cliente (fonte de verdade) + nicho + mensagens
         const { data: clienteData } = await supabase
             .from('clientes')
             .select('*')
@@ -1065,11 +1009,19 @@ async function sincronizarComSupabase() {
             cacheLocal.config.horarioJantar     = clienteData.horario_jantar    || cacheLocal.config.horarioJantar;
             cacheLocal.config.fechadoHoje       = clienteData.fechado_hoje !== undefined ? clienteData.fechado_hoje : cacheLocal.config.fechadoHoje;
             cacheLocal.config.motivoFechado     = clienteData.motivo_fechado    || cacheLocal.config.motivoFechado;
-            // Nicho do tenant (lido em tempo de execução do Supabase)
-            if (clienteData.niche) cacheLocal.config.niche = clienteData.niche;
+
+            const niche = (clienteData.niche || cacheLocal.niche || NICHE_PADRAO);
+            if (niche !== cacheLocal.niche) {
+                cacheLocal.niche = niche;
+                console.log(`[NICHE] Cliente "${CLIENTE_ID}" → nicho "${niche}".`);
+            }
+            // Compatibilidade com db.getNiche() do Motor Único
+            cacheLocal.config.niche = niche;
+
+            cacheLocal.config.mensagens = await carregarMensagensDoNicho(niche);
         }
 
-        // 2. Busca cardápio do Supabase (se houver registros lá)
+        // 2. Cardápio do Supabase (nuvem manda; NÃO envia local de volta)
         const { data: cardapioData } = await supabase
             .from('cardapio')
             .select('*')
@@ -1087,12 +1039,12 @@ async function sincronizarComSupabase() {
                 icone:     r.icone || '🍽️',
                 ativo:     r.ativo !== false
             }));
+        } else if (!Array.isArray(cacheLocal.config.cardapio) || cacheLocal.config.cardapio.length === 0) {
+            // Offline puro: usa os seeds em memória só para funcionar.
+            cacheLocal.config.cardapio = DEFAULT_CARDAPIO;
         }
 
-        // 2.5. Sincroniza cardápio LOCAL → Supabase (envia atualizações locais para a nuvem)
-        await sincronizarCardapioParaSupabase();
-
-        // 3. Busca categorias do Supabase
+        // 3. Categorias do Supabase
         const { data: categoriasData } = await supabase
             .from('categorias')
             .select('*')
@@ -1108,9 +1060,11 @@ async function sincronizarComSupabase() {
                 ordem: r.ordem || 0,
                 ativo: r.ativo !== false
             }));
+        } else if (!Array.isArray(cacheLocal.config.categorias) || cacheLocal.config.categorias.length === 0) {
+            cacheLocal.config.categorias = DEFAULT_CATEGORIAS;
         }
 
-        // 4. Busca opções extras (carnes e bordas)
+        // 4. Opções extras (carnes e bordas)
         const { data: opcoesData } = await supabase
             .from('opcoes_extras')
             .select('*')
@@ -1123,7 +1077,7 @@ async function sincronizarComSupabase() {
             if (bordas.length > 0) cacheLocal.config.opcoesBordas = bordas;
         }
 
-        // 5. Busca pedidos do Supabase
+        // 5. Pedidos do Supabase (nuvem manda; mantém só os locais pendentes)
         const { data: pedData } = await supabase
             .from('pedidos')
             .select('*')
@@ -1159,15 +1113,16 @@ async function sincronizarComSupabase() {
                 concluidoEm:     p.concluido_em
             }));
 
+            // Preserva apenas pedidos ainda não enviados à nuvem (offline)
             const idsNuvem = new Set(mapped.map(m => m.id));
             const apenasLocais = (cacheLocal.pedidos || []).filter(p => !idsNuvem.has(p.id));
             cacheLocal.pedidos      = [...mapped, ...apenasLocais];
             cacheLocal.agendamentos = cacheLocal.pedidos;
-            salvarDados(cacheLocal);
         }
 
         return true;
     } catch (err) {
+        console.warn('⚠️ [SUPABASE] Erro na sincronização:', err.message);
         return false;
     }
 }
@@ -1183,13 +1138,13 @@ async function inicializarDatabase() {
     // 1ª passada: provisiona o cliente se ainda não existe no banco
     const provisionado = await provisionarCliente();
 
-    // Sincroniza dados do Supabase → local
+    // Sincroniza dados do Supabase → cache (read-only no boot)
     if (provisionado) {
         const ok = await sincronizarComSupabase();
         if (ok) {
             console.log(`✅ [NUVEM] Dados sincronizados com sucesso para "${CLIENTE_ID}"!`);
         } else {
-            console.log(`ℹ️ [OFFLINE / LOCAL] Operando com cardápio e dados locais.`);
+            console.log(`ℹ️ [OFFLINE] Operando 100% em memória até a conexão voltar.`);
         }
     }
 
@@ -1468,12 +1423,17 @@ function limparEstadoConversa(telefone) {
 // CONFIGURAÇÕES (getters e setters)
 // =====================================================================
 function getConfig() {
+    // Garante que mensagens sempre existam (termos do nicho) mesmo
+    // antes da primeira sincronização com o Supabase.
+    if (!cacheLocal.config.mensagens || Object.keys(cacheLocal.config.mensagens).length === 0) {
+        cacheLocal.config.mensagens = getMensagensNicho(cacheLocal.niche || NICHE_PADRAO);
+    }
     return cacheLocal.config;
 }
 
-// Retorna o niche do tenant (lido do Supabase em tempo de execução)
+// Retorna o nicho do tenant (lido do Supabase em tempo de execução)
 function getNiche() {
-    return cacheLocal.config.niche || 'delivery';
+    return cacheLocal.niche || cacheLocal.config.niche || NICHE_PADRAO;
 }
 
 function salvarConfig(novaConfig) {
@@ -1483,7 +1443,7 @@ function salvarConfig(novaConfig) {
 
     const cfg = cacheLocal.config;
 
-    // Persiste dados do cliente na tabela `clientes`
+    // Persiste dados do cliente na tabela `clientes` (ação explícita do painel)
     (async () => {
         try {
             await supabase.from('clientes').upsert({
@@ -1530,6 +1490,23 @@ function salvarConfig(novaConfig) {
                     ordem: cat.ordem || 0, ativo: cat.ativo !== false
                 }));
                 await supabase.from('categorias').upsert(rows, { onConflict: 'cliente_id,categoria_id' });
+            } catch (err) {}
+        })();
+    }
+
+    // Persiste mensagens do bot na tabela mensagens_bot (padrão do painel SaaS)
+    if (novaConfig.mensagens) {
+        (async () => {
+            try {
+                const rows = Object.entries(novaConfig.mensagens || {}).map(([chave, conteudo]) => ({
+                    cliente_id: CLIENTE_ID,
+                    chave,
+                    conteudo: conteudo || '',
+                    updated_at: new Date().toISOString()
+                }));
+                if (rows.length > 0) {
+                    await supabase.from('mensagens_bot').upsert(rows, { onConflict: 'cliente_id,chave' });
+                }
             } catch (err) {}
         })();
     }
