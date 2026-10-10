@@ -1174,12 +1174,34 @@ function isFechadoHoje(dados = null) {
     return false;
 }
 
-function getTurnoAtual() {
+// Turno de comida é exclusivo do nicho delivery.
+// Para nichos fora de delivery (agendamento: barbershop, clinic, petshop,
+// salon) retorna null — o botEngine suprime totalmente a linha de turno.
+function getTurnoAtual(niche) {
+    if (niche && niche !== 'delivery') return null;
+
     const agora   = new Date();
     const minutos = agora.getHours() * 60 + agora.getMinutes();
     if (minutos >= 630 && minutos <= 930)  return { tipo: 'dia',   nome: 'Almoço (Marmitex)',   icone: '🍱', descricao: 'Marmitex fresquinhos saindo quentinhos do fogão!' };
     if (minutos >= 1050 || minutos <= 60)  return { tipo: 'noite', nome: 'Jantar & Pizzaria',    icone: '🍕', descricao: 'Pizzas artesanais quentinhas assadas no capricho!' };
     return { tipo: 'geral', nome: cacheLocal.config.nomeRestaurante || NOME_CLIENTE, icone: '🍽️', descricao: 'Almoço (Marmitex 11h às 15h) e Noite (Pizzas 18h às 23h30)' };
+}
+
+// Horário "normal" para nichos de agendamento (barbershop, clinic, petshop,
+// salon). Exibe somente o que o tenant REALMENTE configurou — os valores
+// padrão de delivery ('11:00 às 15:00' / '18:00 às 23:30') são ignorados,
+// para não vazar horário de restaurante num menu de clínica/barbearia.
+function getHorarioNormal() {
+    const cfg = cacheLocal.config || {};
+    const hAberto  = String(cfg.horarioAlmoco || '').trim();
+    const hFecha   = String(cfg.horarioJantar || '').trim();
+    const DEFAULT_ALMOCO = '11:00 às 15:00';
+    const DEFAULT_JANTAR = '18:00 às 23:30';
+
+    const partes = [];
+    if (hAberto && hAberto !== DEFAULT_ALMOCO) partes.push(hAberto);
+    if (hFecha && hFecha !== DEFAULT_JANTAR && hFecha !== hAberto) partes.push(hFecha);
+    return partes.join(' / ');
 }
 
 // =====================================================================
@@ -1537,6 +1559,7 @@ module.exports = {
     formatarDataLocal,
     isFechadoHoje,
     getTurnoAtual,
+    getHorarioNormal,
     getCategorias,
     getCardapio,
     criarPedido,

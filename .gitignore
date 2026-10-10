@@ -6,6 +6,7 @@ logs/
 .wwebjs_auth_engine2/
 .wwebjs_auth_engine3/
 .wwebjs_auth_engine4/
+.wwebjs_auth_engine5/
 .wwebjs_cache/
 cloudflare/
 agendamentos.json

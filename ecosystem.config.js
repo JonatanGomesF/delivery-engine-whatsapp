@@ -75,7 +75,6 @@ module.exports = {
                 NODE_ENV: 'production',
                 PORT: 3003,
                 CLIENTE_ID: 'barbearia_estilo',       // ← id do tenant no Supabase
-                // NICHE não é mais necessário — o motor único lê o niche do Supabase
                 WWEBJS_AUTH_PATH: './.wwebjs_auth_engine3'  // sessão WhatsApp isolada
             }
         },
@@ -102,6 +101,31 @@ module.exports = {
                 PORT: 3004,                        // ← porta única
                 CLIENTE_ID: 'climeditu2',                // ← id do tenant no Supabase
                 WWEBJS_AUTH_PATH: './.wwebjs_auth_engine4'    // ← sessão WhatsApp isolada (QR próprio)
+            }
+        },
+
+        // ── Tenant 5: Petshop Cão Guarda (Petshop) ──────────────
+        {
+            name: 'engine-petshop-caoguarda',
+            script: 'index.js',
+            cwd: __dirname,
+            watch: false,
+            autorestart: true,
+            max_restarts: 10,
+            min_uptime: '10s',
+            restart_delay: 5000,
+            error_file: './logs/engine5-error.log',
+            out_file: './logs/engine5-output.log',
+            log_date_format: 'YYYY-MM-DD HH:mm:ss',
+            merge_logs: true,
+            max_memory_restart: '800M',
+            interpreter: 'node',
+            exec_mode: 'fork',
+            env: {
+                NODE_ENV: 'production',
+                PORT: 3005,                        // ← porta única
+                CLIENTE_ID: 'caoguarda',                 // ← id do tenant no Supabase
+                WWEBJS_AUTH_PATH: './.wwebjs_auth_engine5'    // ← sessão WhatsApp isolada (QR próprio)
             }
         }
     ]

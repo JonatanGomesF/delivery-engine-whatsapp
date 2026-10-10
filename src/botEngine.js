@@ -952,8 +952,21 @@ async function enviarMenuPrincipal(responder, nomeCliente, config, terms) {
         });
     }
 
-    const turno = db.getTurnoAtual();
-    let avisoTurno = `⏰ *Agora:* ${turno.icone} ${turno.nome} — _${turno.descricao}_\n`;
+    // Nicho do cliente (buscado ANTES de gerar o aviso de turno)
+    const niche = getNiche();
+
+    // Aviso de turno só existe para delivery (Almoço/Jantar).
+    // Fora de delivery: avisoTurno fica vazio (linha totalmente suprimida).
+    const turno = db.getTurnoAtual(niche);
+    let avisoTurno = '';
+    if (turno) {
+        avisoTurno = `⏰ *Agora:* ${turno.icone} ${turno.nome} — _${turno.descricao}_\n`;
+    } else if (getNicheFlow(niche) === 'appointment') {
+        // Agendamento (barbershop/clinic/petshop/salon): apenas o horário
+        // normal, se estiver configurado pelo tenant.
+        const horario = db.getHorarioNormal();
+        if (horario) avisoTurno = `🕘 *Horário:* ${horario}\n`;
+    }
 
     const textoMenu = formatarTexto(mensagens.menuPrincipal || `🍽️ *BEM-VINDO AO {restaurante}* 🍽️\n\nOlá, *{nome}*!\n\n{avisoTurno}\n{avisoFechado}\n1️⃣ 🛒 *Fazer Pedido*\n2️⃣ 📋 *Ver Cardápio*\n3️⃣ 🛵 *Status do Pedido*\n4️⃣ 📍 *Informações & Horários*\n5️⃣ ❌ *Cancelar Pedido*\n\n👉 _Digite o número da opção desejada:_`, {
         restaurante: config.nomeRestaurante.toUpperCase(),
