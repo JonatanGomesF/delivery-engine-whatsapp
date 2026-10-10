@@ -1542,7 +1542,7 @@ function salvarConfig(novaConfig) {
 const criarAgendamento = (params) => criarPedido({
     cliente: params.cliente, telefone: params.telefone,
     itens: [{ nome: params.servico || 'Refeição / Pedido', preco: params.preco || 25, qtd: 1 }],
-    tipoEntrega: 'delivery', formaPagamento: 'PIX', origem: params.origem || 'manual'
+    tipoEntrega: 'agendamento', formaPagamento: 'PIX', origem: params.origem || 'manual'
 });
 const cancelarAgendamento  = (id, tel)  => cancelarPedido(id, tel);
 const concluirAgendamento  = (id)       => atualizarStatusPedido(id, 'concluido');

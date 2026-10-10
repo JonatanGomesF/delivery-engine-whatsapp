@@ -1054,7 +1054,8 @@ async function consultarStatusPedido(responder, from, nomeCliente, config, terms
 
     let lista = pedidos.map(p => {
         const statusTexto = mapaStatus[p.status] || p.status;
-        const tipoTxt = p.tipoEntrega === 'delivery' ? '🛵 Delivery' : '🛍️ Retirada';
+        const tipoTxt = p.tipoEntrega === 'delivery' ? '🛵 Delivery'
+            : ((p.tipoEntrega === 'agendamento' || p.tipoEntrega === 'presencial') ? '📍 Atendimento Presencial' : '🛍️ Retirada');
         return `🎫 *Pedido ${p.codigo}*\n` +
             `🍽️ *Itens:* ${p.servico}\n` +
             `💰 *Total:* ${formatarMoeda(p.total)} (${tipoTxt})\n` +
@@ -1226,7 +1227,9 @@ async function finalizarEConfirmarPedido({ responder, from, nomeCliente, estado,
 
     let entregaInfoDono = ped.tipoEntrega === 'delivery'
         ? `🛵 *DELIVERY:* ${ped.enderecoEntrega}`
-        : `🛍️ *RETIRADA NO BALCÃO*`;
+        : (ped.tipoEntrega === 'agendamento' || ped.tipoEntrega === 'presencial')
+            ? `📍 *ATENDIMENTO PRESENCIAL*`
+            : `🛍️ *RETIRADA NO BALCÃO*`;
 
     let trocoTxt = ped.trocoPara ? ` (Troco para ${formatarMoeda(ped.trocoPara)})` : '';
 
@@ -1259,7 +1262,9 @@ async function finalizarEConfirmarPedido({ responder, from, nomeCliente, estado,
 
     let localEntregaCliente = ped.tipoEntrega === 'delivery'
         ? `📍 *Endereço de Entrega:* ${ped.enderecoEntrega}`
-        : `🛍️ *Retirar no Restaurante:* ${config.endereco}`;
+        : (ped.tipoEntrega === 'agendamento' || ped.tipoEntrega === 'presencial')
+            ? `📍 *Atendimento Presencial*`
+            : `🛍️ *Retirar no Restaurante:* ${config.endereco}`;
 
     let taxaInfoCliente = ped.taxaEntrega > 0 ? `🛵 *Taxa de Entrega:* ${formatarMoeda(ped.taxaEntrega)}\n` : '';
 
