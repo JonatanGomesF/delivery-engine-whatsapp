@@ -11,7 +11,8 @@
     "pm2:stop":    "pm2 stop delivery-engine",
     "pm2:restart": "pm2 restart delivery-engine",
     "pm2:logs":    "pm2 logs delivery-engine",
-    "pm2:status":  "pm2 status"
+    "pm2:status":  "pm2 status",
+    "launch":      "node launcher.js"
   },
   "dependencies": {
     "@supabase/supabase-js":  "^2.117.2",

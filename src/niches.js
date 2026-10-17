@@ -247,19 +247,26 @@ const NICHE_REGISTRY = {
     }
 };
 
-// Retorna a configuração do niche (fallback: delivery)
+// Aliases em português para compatibilidade total com os selects do Painel Master
+NICHE_REGISTRY['barbearia'] = NICHE_REGISTRY['barbershop'];
+NICHE_REGISTRY['clinica']    = NICHE_REGISTRY['clinic'];
+
+// Retorna a configuração do niche (sem fallback para delivery)
 function getNicheConfig(niche) {
-    return NICHE_REGISTRY[niche] || NICHE_REGISTRY['delivery'];
+    if (!niche || !NICHE_REGISTRY[niche]) return null;
+    return NICHE_REGISTRY[niche];
 }
 
-// Retorna os termos do niche (fallback: delivery)
+// Retorna os termos do niche
 function getNicheTerms(niche) {
-    return getNicheConfig(niche).terms;
+    const config = getNicheConfig(niche);
+    return config ? config.terms : null;
 }
 
 // Retorna o fluxo do niche: 'order' ou 'appointment'
 function getNicheFlow(niche) {
-    return getNicheConfig(niche).flow;
+    const config = getNicheConfig(niche);
+    return config ? config.flow : null;
 }
 
 // Lista de nichos válidos
@@ -284,7 +291,7 @@ function getValidNiches() {
 
 // ── DELIVERY — restaurantes, marmitarias, pizzarias ─────────────────
 const MENSAGENS_DELIVERY = {
-    menuPrincipal: `🍽️ *BEM-VINDO AO {restaurante}* 🍽️\n\nOlá, *{nome}*! O que você gostaria de saborear hoje?\n\n{avisoTurno}\n{avisoFechado}\n1️⃣ 🛒 *Fazer Pedido (Marmitex / Pizzas / Bebidas)*\n2️⃣ 📋 *Ver Cardápio Completo*\n3️⃣ 🛵 *Acompanhar Meu Pedido (Status)*\n4️⃣ 📍 *Horários, Endereço & Formas de Pagamento*\n5️⃣ ❌ *Cancelar Pedido*\n\n👉 _Digite o número da opção desejada (Ex: *1*):_`,
+    menuPrincipal: `🍽️ *BEM-VINDO AO {restaurante}* 🍽️\n\nOlá, *{nome}*! Como prefere fazer o seu pedido hoje?\n\n1️⃣ 🛒 *Fazer Pedido por aqui (WhatsApp)*\n2️⃣ 📋 *Ver Cardápio Completo no Chat*\n3️⃣ 🛵 *Acompanhar Meu Pedido (Status)*\n4️⃣ 📍 *Horários, Endereço & Formas de Pagamento*\n5️⃣ ❌ *Cancelar Pedido*\n\n👉 _Digite o número da opção desejada (Ex: 1):_`,
     fechadoAviso: `🛑 *AVISO:* O restaurante está fechado hoje ({motivo}).`,
     escolhaCategoria: `🛒 *FAZER PEDIDO — {restaurante}* 🍽️\n\nEscolha a categoria desejada:\n\n{listaCategorias}\n\n_Digite o número da categoria desejada (Ex: 1):_`,
     escolhaItem: `{tituloCategoria}\n━━━━━━━━━━━━━━━━━━━━\n\n{listaItens}\n\n👉 *Digite o número da opção que deseja adicionar:* (Ex: 1)\n_Envie *MENU* para voltar ao início._`,
@@ -339,14 +346,17 @@ function montarTemplatesAgendamento() {
 const MENSAGENS_NICHO = {
     delivery:   MENSAGENS_DELIVERY,
     barbershop: montarTemplatesAgendamento(),
+    barbearia:  montarTemplatesAgendamento(),
     clinic:     montarTemplatesAgendamento(),
+    clinica:    montarTemplatesAgendamento(),
     petshop:    montarTemplatesAgendamento(),
     salon:      montarTemplatesAgendamento()
 };
 
-// Resolve as mensagens padrão de um nicho, com fallback para delivery.
+// Resolve as mensagens padrão de um nicho (sem fallback para delivery)
 function getMensagensNicho(niche) {
-    return MENSAGENS_NICHO[niche] || MENSAGENS_DELIVERY;
+    if (!niche || !MENSAGENS_NICHO[niche]) return null;
+    return MENSAGENS_NICHO[niche];
 }
 
 module.exports = {

@@ -1,6 +1,7 @@
 const path = require('path');
 const { createClient } = require('@supabase/supabase-js');
 const { getMensagensNicho } = require('./niches');
+const { carregarTenant } = require('./tenants');
 
 // =====================================================================
 // Diretório base da aplicação (compatível com pkg .exe e modo dev)
@@ -11,10 +12,15 @@ const APP_DIR = process.pkg ? path.dirname(process.execPath) : path.resolve(__di
 // Credenciais do Banco Multi-Tenant (delivery_platform)
 // Definidas via variáveis de ambiente OU hardcoded aqui como fallback
 // =====================================================================
-// Preferência: chave de serviço (engine multi-tenant), com fallback para
-// a publishable key usada nas instalações standalone (pkg / painel local).
+// Preferência: chave de serviço (engine multi-tenant) — aceita tanto
+// SUPABASE_SERVICE_ROLE_KEY quanto SUPABASE_SERVICE_KEY; com fallback para
+// SUPABASE_KEY e depois a publishable key usada nas instalações standalone
+// (pkg / painel local).
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://errczksxtizgpmjzfhnv.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY || 'sb_publishable_MmLNWGDwYO0fVxVUC8lCEA_pU113fNw';
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
+                  || process.env.SUPABASE_SERVICE_KEY
+                  || process.env.SUPABASE_KEY
+                  || 'sb_publishable_MmLNWGDwYO0fVxVUC8lCEA_pU113fNw';
 
 // =====================================================================
 // Identidade do tenant — resolvida na seguinte ordem:
@@ -22,41 +28,17 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KE
 //   2. config_delivery.json (instalações standalone / pkg)
 // Nenhum dado de negócio é gravado em arquivo: o Supabase é a fonte.
 // =====================================================================
-const CONFIG_DELIVERY_PATH = path.join(APP_DIR, 'config_delivery.json');
-
 let CLIENTE_ID    = '';
-let NOME_CLIENTE  = 'Meu Delivery';
-let NICHE_PADRAO  = 'delivery';
+let NOME_CLIENTE  = 'Estabelecimento';
+let NICHE_PADRAO  = null;
 
-// Helper read-only para o config de identidade (não confundir com dados locais)
-function fsReadFileJson(caminho) {
-    try {
-        const fs = require('fs');
-        if (fs.existsSync(caminho)) return JSON.parse(fs.readFileSync(caminho, 'utf8'));
-    } catch (e) {}
-    return null;
-}
-
-// 1. Ambiente (PM2 / dotenv) — prioridade máxima
+// Ambiente (PM2 / dotenv) — estrito em minúsculas
 if (process.env.CLIENTE_ID) {
-    CLIENTE_ID = String(process.env.CLIENTE_ID).trim().toLowerCase().replace(/\s+/g, '_');
+    CLIENTE_ID = String(process.env.CLIENTE_ID).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+    process.env.CLIENTE_ID = CLIENTE_ID;
 }
 if (process.env.NICHE) {
-    NICHE_PADRAO = String(process.env.NICHE).trim().toLowerCase() || 'delivery';
-}
-
-// 2. config_delivery.json — fallback (quando não há CLIENTE_ID de ambiente)
-try {
-    const cfg = fsReadFileJson(CONFIG_DELIVERY_PATH);
-    if (cfg) {
-        if (!CLIENTE_ID && cfg.clienteId) {
-            CLIENTE_ID = String(cfg.clienteId).trim().toLowerCase().replace(/\s+/g, '_');
-        }
-        if (cfg.nomeEstabelecimento) NOME_CLIENTE = String(cfg.nomeEstabelecimento).trim();
-        if (cfg.niche)               NICHE_PADRAO = String(cfg.niche).trim().toLowerCase() || 'delivery';
-    }
-} catch (e) {
-    console.warn('⚠️ Não foi possível ler config_delivery.json.');
+    NICHE_PADRAO = String(process.env.NICHE).trim().toLowerCase() || null;
 }
 
 // =====================================================================
@@ -86,710 +68,12 @@ if (!CLIENTE_ID || CLIENTE_ID === CONFIG_EXEMPLO) {
 // no Supabase. Não são mais persistidos em arquivo local nem enviados
 // para a nuvem depois da criação (não sobrescrevem atualizações SaaS).
 // =====================================================================
-const DEFAULT_CATEGORIAS = [
-    { id: 'marmitex', nome: 'Marmitex do Dia (Almoço)',       icone: '🍱', turno: 'dia',    ordem: 1, ativo: true },
-    { id: 'pizza',    nome: 'Pizzas Artesanais (Jantar & Noite)', icone: '🍕', turno: 'noite',  ordem: 2, ativo: true },
-    { id: 'bebida',   nome: 'Bebidas & Extras',                icone: '🥤', turno: 'todos',  ordem: 3, ativo: true }
-];
+const DEFAULT_CATEGORIAS = [];
 
-const DEFAULT_CARDAPIO = [
-    {
-        "id": 1,
-        "categoria": "marmitex",
-        "nome": "Marmitex P (Pequena)",
-        "descricao": "Arroz branco, feijão caseiro, 1 opção de carne e guarnição do dia",
-        "preco": 18,
-        "turno": "dia",
-        "icone": "🍱",
-        "ativo": true
-    },
-    {
-        "id": 2,
-        "categoria": "marmitex",
-        "nome": "Marmitex M (Média - Mais Vendida)",
-        "descricao": "Arroz branco, feijão fresquinho, carne generosa, farofa e guarnições",
-        "preco": 22,
-        "turno": "dia",
-        "icone": "🍱",
-        "ativo": true
-    },
-    {
-        "id": 3,
-        "categoria": "marmitex",
-        "nome": "Marmitex G (Grande)",
-        "descricao": "Porção reforçada: Arroz, feijão, 2 carnes à sua escolha, salada e acompanhamentos",
-        "preco": 26,
-        "turno": "dia",
-        "icone": "🍛",
-        "ativo": true
-    },
-    {
-        "id": 4,
-        "categoria": "pizza",
-        "nome": "ABOBRINHA Mussarela, abobrinha e parmesão",
-        "descricao": "Família: R$ 87.90 | Grande: R$ 56.90 | Média: R$ 47.90",
-        "preco": 87.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 5,
-        "categoria": "pizza",
-        "nome": "ALHO E ÓLEO Mussarela e alho frito",
-        "descricao": "Família: R$ 83.90 | Grande: R$ 59.90 | Média: R$ 47.90",
-        "preco": 83.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 6,
-        "categoria": "pizza",
-        "nome": "ALICE Mussarela e aliche",
-        "descricao": "Família: R$ 110.90 | Grande: R$ 89.90 | Média: R$ 63.90",
-        "preco": 110.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 7,
-        "categoria": "pizza",
-        "nome": "AMERICANA Mussarela, presunto, ervilha e palmito",
-        "descricao": "Família: R$ 90.90 | Grande: R$ 59.90 | Média: R$ 50.90",
-        "preco": 90.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 8,
-        "categoria": "pizza",
-        "nome": "ATUM Atum e cebola",
-        "descricao": "Família: R$ 95.90 | Grande: R$ 74.90 | Média: R$ 49.90",
-        "preco": 95.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 9,
-        "categoria": "pizza",
-        "nome": "BACON Mussarela, bacon, cebola e parmesão",
-        "descricao": "Família: R$ 103.90 | Grande: R$ 77.90 | Média: R$ 57.90",
-        "preco": 103.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 10,
-        "categoria": "pizza",
-        "nome": "BAIANA Calabresa moída, cebola e molho de pimenta",
-        "descricao": "Família: R$ 83.90 | Grande: R$ 59.90 | Média: R$ 44.90",
-        "preco": 83.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 11,
-        "categoria": "pizza",
-        "nome": "BATATA FRITA 1 Mussarela, batata frita, bacon e parmesão",
-        "descricao": "Família: R$ 99.90 | Grande: R$ 77.90 | Média: R$ 55.90",
-        "preco": 99.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 12,
-        "categoria": "pizza",
-        "nome": "BATATA FRITA 2 Mussarela, batata frita, bacon e catupiry",
-        "descricao": "Família: R$ 99.90 | Grande: R$ 77.90 | Média: R$ 55.90",
-        "preco": 99.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 13,
-        "categoria": "pizza",
-        "nome": "BATATA FRITA 3 Mussarela, batata frita, bacon e cheddar",
-        "descricao": "Família: R$ 99.90 | Grande: R$ 77.90 | Média: R$ 55.90",
-        "preco": 99.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 14,
-        "categoria": "pizza",
-        "nome": "BOM SABOR Mussarela, frango, milho, palmito e cheddar",
-        "descricao": "Família: R$ 94.90 | Grande: R$ 73.90 | Média: R$ 48.90",
-        "preco": 94.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 15,
-        "categoria": "pizza",
-        "nome": "BRÓCOLIS Mussarela, brócolis, catupiry, bacon e alho frito",
-        "descricao": "Família: R$ 99.90 | Grande: R$ 77.90 | Média: R$ 53.90",
-        "preco": 99.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 16,
-        "categoria": "pizza",
-        "nome": "CAIPIRA Mussarela, frango com catupiry e milho",
-        "descricao": "Família: R$ 99.90 | Grande: R$ 77.90 | Média: R$ 53.90",
-        "preco": 99.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 17,
-        "categoria": "pizza",
-        "nome": "CALABRESA Calabresa e cebola",
-        "descricao": "Família: R$ 90.90 | Grande: R$ 59.90 | Média: R$ 42.90",
-        "preco": 90.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 18,
-        "categoria": "pizza",
-        "nome": "CALABRESA ESPECIAL Calabresa, cebola e catupiry",
-        "descricao": "Família: R$ 93.90 | Grande: R$ 62.90 | Média: R$ 43.90",
-        "preco": 93.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 19,
-        "categoria": "pizza",
-        "nome": "CALZONE À MODA Mussarela, escarola, calabresa, milho, palmito, catupiry e parmesão",
-        "descricao": "Família: R$ 110.00 | Grande: R$ 88.90 | Média: R$ 60.90",
-        "preco": 110,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 20,
-        "categoria": "pizza",
-        "nome": "CREME DE FRANGO Mussarela, frango desfiado, catupiry e parmesão",
-        "descricao": "Família: R$ 110.00 | Grande: R$ 88.90 | Média: R$ 59.90",
-        "preco": 110,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 21,
-        "categoria": "pizza",
-        "nome": "CATUPIRY Mussarela e catupiry",
-        "descricao": "Família: R$ 90.90 | Grande: R$ 59.90 | Média: R$ 45.90",
-        "preco": 90.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 22,
-        "categoria": "pizza",
-        "nome": "CINCO QUEIJOS Mussarela, provolone, gorgonzola, catupiry e parmesão",
-        "descricao": "Família: R$ 118.90 | Grande: R$ 93.90 | Média: R$ 67.90",
-        "preco": 118.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 23,
-        "categoria": "pizza",
-        "nome": "CROCANTE Frango com catupiry, mussarela e batata palha",
-        "descricao": "Família: R$ 90.90 | Grande: R$ 62.90 | Média: R$ 49.90",
-        "preco": 90.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 24,
-        "categoria": "pizza",
-        "nome": "ESCAROLA Mussarela e escarola",
-        "descricao": "Família: R$ 82.90 | Grande: R$ 59.90 | Média: R$ 42.90",
-        "preco": 82.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 25,
-        "categoria": "pizza",
-        "nome": "ESCAROLA 2 Mussarela, escarola, aliche e parmesão",
-        "descricao": "Família: R$ 110.90 | Grande: R$ 91.90 | Média: R$ 64.90",
-        "preco": 110.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 26,
-        "categoria": "pizza",
-        "nome": "ESCAROLA 3 Mussarela, escarola, catupiry e bacon",
-        "descricao": "Família: R$ 105.90 | Grande: R$ 89.90 | Média: R$ 59.90",
-        "preco": 105.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 27,
-        "categoria": "pizza",
-        "nome": "FANÁTICOS Mussarela, champignon, bacon fatiado, pimentão fatiado e parmesão",
-        "descricao": "Família: R$ 99.90 | Grande: R$ 69.90 | Média: R$ 52.90",
-        "preco": 99.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 28,
-        "categoria": "pizza",
-        "nome": "FRANGO COM CATUPIRY Mussarela, frango e catupiry",
-        "descricao": "Família: R$ 93.90 | Grande: R$ 63.90 | Média: R$ 49.90",
-        "preco": 93.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 29,
-        "categoria": "pizza",
-        "nome": "FRANGO COM CHEDDAR Mussarela, frango e cheddar",
-        "descricao": "Família: R$ 93.90 | Grande: R$ 63.90 | Média: R$ 49.90",
-        "preco": 93.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 30,
-        "categoria": "pizza",
-        "nome": "GUARANÁ Presunto, mussarela, cebola, catupiry, tomate picado, champignon e azeitonas recheadas",
-        "descricao": "Família: R$ 99.90 | Grande: R$ 73.90 | Média: R$ 60.90",
-        "preco": 99.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 31,
-        "categoria": "pizza",
-        "nome": "LOMBO Mussarela, lombo e cebola",
-        "descricao": "Família: R$ 91.90 | Grande: R$ 64.90 | Média: R$ 49.90",
-        "preco": 91.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 32,
-        "categoria": "pizza",
-        "nome": "LOMBO ESPECIAL Mussarela, lombo, bacon, cebola e catupiry",
-        "descricao": "Família: R$ 98.90 | Grande: R$ 71.90 | Média: R$ 54.90",
-        "preco": 98.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 33,
-        "categoria": "pizza",
-        "nome": "MARGUERITA Mussarela e manjericão",
-        "descricao": "Família: R$ 90.90 | Grande: R$ 62.90 | Média: R$ 42.90",
-        "preco": 90.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 34,
-        "categoria": "pizza",
-        "nome": "MARGUERITA ESPECIAL Mussarela de búfala, manjericão e alho frito",
-        "descricao": "Família: R$ 96.90 | Grande: R$ 80.90 | Média: R$ 54.90",
-        "preco": 96.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 35,
-        "categoria": "pizza",
-        "nome": "MILHO Mussarela e milho",
-        "descricao": "Família: R$ 85.90 | Grande: R$ 59.90 | Média: R$ 42.90",
-        "preco": 85.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 36,
-        "categoria": "pizza",
-        "nome": "MILHO COM CATUPIRY Mussarela, milho e catupiry",
-        "descricao": "Família: R$ 89.90 | Grande: R$ 62.90 | Média: R$ 47.90",
-        "preco": 89.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 37,
-        "categoria": "pizza",
-        "nome": "MODA DA CASA Mussarela, escarola, cebola, catupiry, bacon e calabresa",
-        "descricao": "Família: R$ 97.90 | Grande: R$ 64.90 | Média: R$ 51.90",
-        "preco": 97.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 38,
-        "categoria": "pizza",
-        "nome": "MODA DA FAMÍLIA BOM SABOR Mussarela, frango picado e refogado, provolone, tomate e cebola",
-        "descricao": "Família: R$ 115.90 | Grande: R$ 90.90 | Média: R$ 64.90",
-        "preco": 115.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 39,
-        "categoria": "pizza",
-        "nome": "MODA DA GABY Mussarela, contra-filé refogado, provolone, tomate e cebola",
-        "descricao": "Família: R$ 125.90 | Grande: R$ 99.90 | Média: R$ 69.90",
-        "preco": 125.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 40,
-        "categoria": "pizza",
-        "nome": "MODA DO PIZZAIOLLO Mussarela, presunto, ovo, catupiry e bacon",
-        "descricao": "Família: R$ 97.90 | Grande: R$ 64.90 | Média: R$ 50.90",
-        "preco": 97.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 41,
-        "categoria": "pizza",
-        "nome": "MUSSARELA Mussarela e rodelas de tomate",
-        "descricao": "Família: R$ 97.90 | Grande: R$ 61.90 | Média: R$ 43.90",
-        "preco": 97.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 42,
-        "categoria": "pizza",
-        "nome": "MUSSARELA ESPECIAL Mussarela de búfala e tomate seco",
-        "descricao": "Família: R$ 107.90 | Grande: R$ 83.90 | Média: R$ 58.90",
-        "preco": 107.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 43,
-        "categoria": "pizza",
-        "nome": "NAPOLITANA Mussarela, rodelas de tomate e parmesão",
-        "descricao": "Família: R$ 99.90 | Grande: R$ 65.90 | Média: R$ 46.90",
-        "preco": 99.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 44,
-        "categoria": "pizza",
-        "nome": "PALMITO Mussarela e palmito",
-        "descricao": "Família: R$ 92.90 | Grande: R$ 64.90 | Média: R$ 58.90",
-        "preco": 92.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 45,
-        "categoria": "pizza",
-        "nome": "PALMITO COM CATUPIRY Mussarela, palmito e catupiry",
-        "descricao": "Família: R$ 95.90 | Grande: R$ 66.90 | Média: R$ 59.90",
-        "preco": 95.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 46,
-        "categoria": "pizza",
-        "nome": "PEITO DE PERU Mussarela, peito de peru e catupiry",
-        "descricao": "Família: R$ 98.90 | Grande: R$ 84.90 | Média: R$ 55.90",
-        "preco": 98.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 47,
-        "categoria": "pizza",
-        "nome": "PEPPERONI Mussarela e pepperoni",
-        "descricao": "Família: R$ 113.90 | Grande: R$ 84.90 | Média: R$ 57.90",
-        "preco": 113.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 48,
-        "categoria": "pizza",
-        "nome": "PORTUGUESA Mussarela, presunto, ovo, ervilha, palmito e cebola",
-        "descricao": "Família: R$ 97.90 | Grande: R$ 66.90 | Média: R$ 50.90",
-        "preco": 97.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 49,
-        "categoria": "pizza",
-        "nome": "PRESUNTO Mussarela, presunto e rodelas de tomate",
-        "descricao": "Família: R$ 85.90 | Grande: R$ 59.90 | Média: R$ 44.90",
-        "preco": 85.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 50,
-        "categoria": "pizza",
-        "nome": "PRESUNTO 2 Mussarela, presunto, tomate e catupiry",
-        "descricao": "Família: R$ 93.90 | Grande: R$ 64.90 | Média: R$ 48.90",
-        "preco": 93.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 51,
-        "categoria": "pizza",
-        "nome": "PROVOLONE Mussarela, provolone e rodelas de tomate",
-        "descricao": "Família: R$ 113.90 | Grande: R$ 85.90 | Média: R$ 59.90",
-        "preco": 113.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 52,
-        "categoria": "pizza",
-        "nome": "QUATRO QUEIJOS Mussarela, provolone, gorgonzola e catupiry",
-        "descricao": "Família: R$ 115.90 | Grande: R$ 91.90 | Média: R$ 65.90",
-        "preco": 115.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 53,
-        "categoria": "pizza",
-        "nome": "RÚCULA Mussarela de búfala, tomate seco e rúcula",
-        "descricao": "Família: R$ 107.90 | Grande: R$ 86.90 | Média: R$ 58.90",
-        "preco": 107.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 54,
-        "categoria": "pizza",
-        "nome": "SEIS QUEIJOS Mussarela, provolone, gorgonzola, parmesão, ricota e catupiry",
-        "descricao": "Família: R$ 119.90 | Grande: R$ 96.90 | Média: R$ 67.90",
-        "preco": 119.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 55,
-        "categoria": "pizza",
-        "nome": "SICILIANA Mussarela, champignon e bacon",
-        "descricao": "Família: R$ 104.90 | Grande: R$ 79.90 | Média: R$ 55.90",
-        "preco": 104.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 56,
-        "categoria": "pizza",
-        "nome": "STROGONOFF DE CARNE Mussarela, strogonoff de carne e batata palha",
-        "descricao": "Família: R$ 118.90 | Grande: R$ 97.90 | Média: R$ 70.90",
-        "preco": 118.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 57,
-        "categoria": "pizza",
-        "nome": "STROGONOFF DE FRANGO Mussarela, strogonoff de frango e batata palha",
-        "descricao": "Família: R$ 106.90 | Grande: R$ 94.90 | Média: R$ 65.90",
-        "preco": 106.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 58,
-        "categoria": "pizza",
-        "nome": "TOSCANA Mussarela, calabresa moída e cebola",
-        "descricao": "Família: R$ 91.90 | Grande: R$ 59.90 | Média: R$ 43.90",
-        "preco": 91.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 59,
-        "categoria": "pizza",
-        "nome": "TRÊS QUEIJOS Mussarela, provolone e catupiry",
-        "descricao": "Família: R$ 110.90 | Grande: R$ 85.90 | Média: R$ 59.90",
-        "preco": 110.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 60,
-        "categoria": "pizza",
-        "nome": "VEGETARIANA Mussarela, palmito, ervilha, brócolis e ovo",
-        "descricao": "Família: R$ 93.90 | Grande: R$ 61.90 | Média: R$ 50.90",
-        "preco": 93.9,
-        "turno": "noite",
-        "icone": "🍕",
-        "ativo": true
-    },
-    {
-        "id": 61,
-        "categoria": "pizza",
-        "nome": "BANANA Mussarela, banana, açúcar e canela e leite condensado",
-        "descricao": "Família: R$ 90.90 | Grande: R$ 60.90 | Média: R$ 45.90",
-        "preco": 90.9,
-        "turno": "noite",
-        "icone": "🍰",
-        "ativo": true
-    },
-    {
-        "id": 62,
-        "categoria": "pizza",
-        "nome": "BRIGADEIRO Pasta de chocolate e granulado",
-        "descricao": "Família: R$ 103.90 | Grande: R$ 70.90 | Média: R$ 50.90",
-        "preco": 103.9,
-        "turno": "noite",
-        "icone": "🍰",
-        "ativo": true
-    },
-    {
-        "id": 63,
-        "categoria": "pizza",
-        "nome": "ROMEU E JULIETA Mussarela e goiabada",
-        "descricao": "Família: R$ 90.90 | Grande: R$ 60.90 | Média: R$ 45.90",
-        "preco": 90.9,
-        "turno": "noite",
-        "icone": "🍰",
-        "ativo": true
-    },
-    {
-        "id": 64,
-        "categoria": "pizza",
-        "nome": "PRESTÍGIO Pasta de chocolate, granulado e coco ralado",
-        "descricao": "Família: R$ 106.90 | Grande: R$ 71.90 | Média: R$ 55.90",
-        "preco": 106.9,
-        "turno": "noite",
-        "icone": "🍰",
-        "ativo": true
-    },
-    {
-        "id": 65,
-        "categoria": "bebida",
-        "nome": "Coca-Cola",
-        "descricao": "",
-        "preco": 18,
-        "turno": "todos",
-        "icone": "🥤",
-        "ativo": true
-    },
-    {
-        "id": 66,
-        "categoria": "bebida",
-        "nome": "Fanta Laranja",
-        "descricao": "",
-        "preco": 16,
-        "turno": "todos",
-        "icone": "🥤",
-        "ativo": true
-    },
-    {
-        "id": 67,
-        "categoria": "bebida",
-        "nome": "Tubaina",
-        "descricao": "",
-        "preco": 12,
-        "turno": "todos",
-        "icone": "🥤",
-        "ativo": true
-    },
-    {
-        "id": 68,
-        "categoria": "bebida",
-        "nome": "Kuat",
-        "descricao": "",
-        "preco": 12,
-        "turno": "todos",
-        "icone": "🥤",
-        "ativo": true
-    }
-];
+const DEFAULT_CARDAPIO = [];
 
-const DEFAULT_OPCOES_CARNES = [
-    { id: 1, nome: '🥩 Bife Bovino Acebolado',        ativo: true },
-    { id: 2, nome: '🍗 Peito de Frango Grelhado',     ativo: true },
-    { id: 3, nome: '🥓 Bisteca Suína na Brasa',       ativo: true },
-    { id: 4, nome: '🧀 Filé de Frango à Parmegiana',  ativo: true },
-    { id: 5, nome: '🐟 Filé de Peixe Empanado',       ativo: true },
-    { id: 6, nome: '🍳 Omelete com Queijo e Tomate',  ativo: true }
-];
-
-const DEFAULT_OPCOES_BORDAS = [
-    { id: 1, nome: 'Tradicional (Sem borda extra)',    preco: 0.00,  ativo: true },
-    { id: 2, nome: 'Borda de Catupiry Original',       preco: 8.00,  ativo: true },
-    { id: 3, nome: 'Borda de Cheddar Cremoso',         preco: 8.00,  ativo: true },
-    { id: 4, nome: 'Borda de Chocolate ao Leite',      preco: 10.00, ativo: true }
-];
+const DEFAULT_OPCOES_CARNES = [];
+const DEFAULT_OPCOES_BORDAS = [];
 
 const DEFAULT_CONFIG = {
     nomeRestaurante:    NOME_CLIENTE,
@@ -801,17 +85,17 @@ const DEFAULT_CONFIG = {
     taxaEntregaPadrao:  5.00,
     tempoEstimadoMin:   30,
     tempoEstimadoMax:   50,
-    horarioAlmoco:      '11:00 às 15:00',
-    horarioJantar:      '18:00 às 23:30',
+    horarioAlmoco:      '',
+    horarioJantar:      '',
     fechadoHoje:        false,
-    motivoFechado:      'Descanso semanal da equipe',
+    motivoFechado:      '',
     dataFechadaManual:  null,
     diasSemana: { 0: 'Domingo', 1: 'Segunda', 2: 'Terça', 3: 'Quarta', 4: 'Quinta', 5: 'Sexta', 6: 'Sábado' },
-    categorias:    DEFAULT_CATEGORIAS,
-    cardapio:      DEFAULT_CARDAPIO,
-    opcoesCarnes:  DEFAULT_OPCOES_CARNES,
-    opcoesBordas:  DEFAULT_OPCOES_BORDAS,
-    mensagens:     getMensagensNicho(NICHE_PADRAO)
+    categorias:    [],
+    cardapio:      [],
+    opcoesCarnes:  [],
+    opcoesBordas:  [],
+    mensagens:     {}
 };
 
 // =====================================================================
@@ -954,29 +238,142 @@ async function provisionarOpcoesPadrao() {
 }
 
 // =====================================================================
-// Leitura das mensagens do bot (CRUD relacional no Supabase):
-//   1. Base = termos do nicho (src/niches.js)
-//   2. Sobrescreve com as LINHAS da tabela mensagens_bot
-//      (id, cliente_id, chave, conteudo) filtradas por cliente_id.
-// Sem JSONs empacotados: cada mensagem é um registro individual.
-// Se o cliente não tem mensagem customizada, usa o nicho.
 // =====================================================================
-async function carregarMensagensDoNicho(niche) {
-    const mensagens = { ...getMensagensNicho(niche) };
+// Leitura das mensagens do bot com resolução estrita de precedência:
+//   1. Base = Nicho (src/niches.js)
+//   2. Componente Tenant (src/tenants/${clienteId}.js)
+//   3. Tabela mensagens_bot no Supabase (personalizações salvas)
+// Precedência de entrega final: Banco ➔ Componente Tenant ➔ Nicho
+// =====================================================================
+async function carregarMensagensDoNicho(niche, clienteId = CLIENTE_ID) {
+    const resolvidas = await getMensagensResolvidas(clienteId, niche);
+    return resolvidas.mensagens;
+}
 
+/**
+ * Retorna as mensagens com o fallback completo:
+ * 1. Base do Nicho
+ * 2. Componente do Tenant (se existir em src/tenants/)
+ * 3. Tabela mensagens_bot no Supabase (personalizações salvas)
+ */
+async function getMensagensResolvidas(clienteId = CLIENTE_ID, niche = null) {
+    const resolvedClienteId = (clienteId || CLIENTE_ID || 'default').toLowerCase().trim();
+    const nichoAlvo = niche || cacheLocal.niche || 'delivery';
+
+    // 1. Nicho base
+    const padraoNicho = { ...getMensagensNicho(nichoAlvo) };
+    const padroes = { ...padraoNicho };
+
+    // 2. Componente do Tenant
+    try {
+        const tenant = carregarTenant(resolvedClienteId);
+        if (tenant) {
+            if (tenant.menuPrincipal) {
+                padroes.menuPrincipal = tenant.menuPrincipal;
+            }
+            if (tenant.mensagens && typeof tenant.mensagens === 'object') {
+                Object.assign(padroes, tenant.mensagens);
+            }
+        }
+    } catch (e) {
+        console.warn('⚠️ [TENANT] Falha ao resolver componente tenant:', e.message);
+    }
+
+    const mensagens = { ...padroes };
+    const customizadas = {};
+
+    // 3. Supabase mensagens_bot (fonte da verdade de edições do cliente)
     try {
         const { data: rowsMen } = await supabase
             .from('mensagens_bot')
             .select('chave, conteudo')
-            .eq('cliente_id', CLIENTE_ID);
+            .eq('cliente_id', resolvedClienteId);
 
         (rowsMen || []).forEach(m => {
-            // Só sobrescreve com conteúdo real — linha vazia = mantém o padrão do nicho
-            if (m && m.chave && m.conteudo) mensagens[m.chave] = m.conteudo;
+            if (m && m.chave) {
+                const conteudoStr = String(m.conteudo !== undefined ? m.conteudo : '').trim();
+                if (conteudoStr !== '') {
+                    mensagens[m.chave] = m.conteudo;
+                    customizadas[m.chave] = true;
+                }
+            }
         });
-    } catch (e) { /* tabela pode não existir em bancos antigos */ }
+    } catch (e) {
+        // Tabela pode estar indisponível ou offline
+    }
 
-    return mensagens;
+    return {
+        clienteId: resolvedClienteId,
+        niche: nichoAlvo,
+        mensagens,
+        padroes,
+        customizadas
+    };
+}
+
+/**
+ * Salva ou remove customizações de mensagens do cliente no Supabase
+ */
+async function salvarMensagensBot(payload, clienteId = CLIENTE_ID) {
+    const resolvedClienteId = (clienteId || CLIENTE_ID || 'default').toLowerCase().trim();
+    let lista = [];
+
+    if (Array.isArray(payload)) {
+        lista = payload;
+    } else if (payload && Array.isArray(payload.mensagens)) {
+        lista = payload.mensagens;
+    } else if (payload && payload.mensagens && typeof payload.mensagens === 'object') {
+        lista = Object.entries(payload.mensagens).map(([chave, conteudo]) => ({ chave, conteudo }));
+    } else if (payload && typeof payload === 'object') {
+        lista = Object.entries(payload).map(([chave, conteudo]) => ({ chave, conteudo }));
+    }
+
+    const salvar = [];
+    const remover = [];
+
+    for (const item of lista) {
+        const chave = String(item.chave || '').trim();
+        if (!chave) continue;
+
+        const conteudo = String(item.conteudo !== undefined ? item.conteudo : '').trim();
+        if (conteudo === '' || item.restaurar) {
+            remover.push(chave);
+        } else {
+            salvar.push({ chave, conteudo: item.conteudo });
+        }
+    }
+
+    try {
+        if (remover.length > 0) {
+            await supabase
+                .from('mensagens_bot')
+                .delete()
+                .eq('cliente_id', resolvedClienteId)
+                .in('chave', remover);
+        }
+
+        if (salvar.length > 0) {
+            const rows = salvar.map(s => ({
+                cliente_id: resolvedClienteId,
+                chave: s.chave,
+                conteudo: s.conteudo,
+                updated_at: new Date().toISOString()
+            }));
+            await supabase
+                .from('mensagens_bot')
+                .upsert(rows, { onConflict: 'cliente_id,chave' });
+        }
+    } catch (err) {
+        console.error('⚠️ [SUPABASE] Erro ao salvar mensagens_bot:', err.message);
+        throw err;
+    }
+
+    const resolvidas = await getMensagensResolvidas(resolvedClienteId, cacheLocal.niche);
+    if (resolvedClienteId === CLIENTE_ID) {
+        cacheLocal.config.mensagens = resolvidas.mensagens;
+    }
+
+    return resolvidas;
 }
 
 // =====================================================================
@@ -1039,9 +436,8 @@ async function sincronizarComSupabase() {
                 icone:     r.icone || '🍽️',
                 ativo:     r.ativo !== false
             }));
-        } else if (!Array.isArray(cacheLocal.config.cardapio) || cacheLocal.config.cardapio.length === 0) {
-            // Offline puro: usa os seeds em memória só para funcionar.
-            cacheLocal.config.cardapio = DEFAULT_CARDAPIO;
+        } else {
+            cacheLocal.config.cardapio = [];
         }
 
         // 3. Categorias do Supabase
@@ -1060,8 +456,8 @@ async function sincronizarComSupabase() {
                 ordem: r.ordem || 0,
                 ativo: r.ativo !== false
             }));
-        } else if (!Array.isArray(cacheLocal.config.categorias) || cacheLocal.config.categorias.length === 0) {
-            cacheLocal.config.categorias = DEFAULT_CATEGORIAS;
+        } else {
+            cacheLocal.config.categorias = [];
         }
 
         // 4. Opções extras (carnes e bordas)
@@ -1208,13 +604,13 @@ function getHorarioNormal() {
 // Cardápio & Categorias
 // =====================================================================
 function getCategorias(apenasAtivas = true) {
-    let cats = cacheLocal.config.categorias || DEFAULT_CATEGORIAS;
+    let cats = cacheLocal.config.categorias || [];
     if (apenasAtivas) cats = cats.filter(c => c.ativo !== false);
     return cats.sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
 }
 
 function getCardapio(filtro = {}) {
-    let cardapio = cacheLocal.config.cardapio || DEFAULT_CARDAPIO;
+    let cardapio = cacheLocal.config.cardapio || [];
     if (filtro.categoria)                            cardapio = cardapio.filter(i => i.categoria === filtro.categoria);
     if (filtro.turno && filtro.turno !== 'todos')    cardapio = cardapio.filter(i => i.turno === filtro.turno || i.turno === 'todos');
     if (filtro.apenasAtivos !== false)               cardapio = cardapio.filter(i => i.ativo !== false);
@@ -1445,17 +841,16 @@ function limparEstadoConversa(telefone) {
 // CONFIGURAÇÕES (getters e setters)
 // =====================================================================
 function getConfig() {
-    // Garante que mensagens sempre existam (termos do nicho) mesmo
-    // antes da primeira sincronização com o Supabase.
-    if (!cacheLocal.config.mensagens || Object.keys(cacheLocal.config.mensagens).length === 0) {
-        cacheLocal.config.mensagens = getMensagensNicho(cacheLocal.niche || NICHE_PADRAO);
+    // Garante que mensagens existam quando houver nicho configurado
+    if ((!cacheLocal.config.mensagens || Object.keys(cacheLocal.config.mensagens).length === 0) && cacheLocal.niche) {
+        cacheLocal.config.mensagens = getMensagensNicho(cacheLocal.niche) || {};
     }
     return cacheLocal.config;
 }
 
 // Retorna o nicho do tenant (lido do Supabase em tempo de execução)
 function getNiche() {
-    return cacheLocal.niche || cacheLocal.config.niche || NICHE_PADRAO;
+    return cacheLocal.niche || cacheLocal.config.niche || null;
 }
 
 function salvarConfig(novaConfig) {
@@ -1551,6 +946,203 @@ const getTodosAgendamentos = (filtro)   => getTodosPedidos(filtro);
 const getHorariosDisponiveis    = () => ['11:00', '12:00', '13:00', '14:00', '18:00', '19:00', '20:00', '21:00', '22:00'];
 const getProximosDiasDisponiveis = () => [];
 
+async function carregarMensagensDoNicho(niche, clienteId = CLIENTE_ID) {
+    const resolvidas = await getMensagensResolvidas(clienteId, niche);
+    return resolvidas.mensagens;
+}
+
+async function getMensagensResolvidas(clienteId = CLIENTE_ID, niche = null) {
+    const resolvedClienteId = (clienteId || CLIENTE_ID || 'default').toLowerCase().trim();
+    const nichoAlvo = niche || cacheLocal.niche || 'delivery';
+
+    // 1. Nicho base
+    const padraoNicho = { ...getMensagensNicho(nichoAlvo) };
+    const padroes = { ...padraoNicho };
+
+    let hasPizzas = nichoAlvo === 'delivery';
+    let hasMeats = false;
+    let realCategories = [];
+
+    // 2. Componente do Tenant (precedência sobre o nicho base)
+    let tenantComponent = null;
+    try {
+        tenantComponent = carregarTenant(resolvedClienteId);
+        if (tenantComponent) {
+            if (tenantComponent.menuPrincipal) {
+                padroes.menuPrincipal = tenantComponent.menuPrincipal;
+            }
+            if (tenantComponent.mensagens && typeof tenantComponent.mensagens === 'object') {
+                Object.assign(padroes, tenantComponent.mensagens);
+            }
+            if (typeof tenantComponent.hasPizzas === 'boolean') {
+                hasPizzas = tenantComponent.hasPizzas;
+            }
+            if (typeof tenantComponent.hasMeats === 'boolean') {
+                hasMeats = tenantComponent.hasMeats;
+            }
+        }
+    } catch (e) {
+        console.warn('⚠️ [TENANT] Falha ao resolver componente tenant:', e.message);
+    }
+
+    // Consulta estrita das categorias reais do cardápio no Supabase para validar nicho
+    try {
+        const { data: rowsCard } = await supabase
+            .from('cardapio')
+            .select('categoria')
+            .eq('cliente_id', resolvedClienteId);
+
+        if (rowsCard && rowsCard.length > 0) {
+            realCategories = [...new Set(rowsCard.map(r => r.categoria).filter(Boolean))];
+            const temPizzaNaCategoria = realCategories.some(c => /pizza/i.test(c));
+            if (!temPizzaNaCategoria && tenantComponent?.hasPizzas !== true) {
+                hasPizzas = false;
+            }
+            if (realCategories.some(c => /marmit/i.test(c) || /prato/i.test(c) || /executivo/i.test(c))) {
+                hasMeats = true;
+            }
+        }
+    } catch (e) {
+        if (cacheLocal.config?.cardapio && Array.isArray(cacheLocal.config.cardapio)) {
+            realCategories = [...new Set(cacheLocal.config.cardapio.map(r => r.categoria).filter(Boolean))];
+            if (!realCategories.some(c => /pizza/i.test(c)) && tenantComponent?.hasPizzas !== true) {
+                hasPizzas = false;
+            }
+        }
+    }
+
+    // Força estritamente false para sabordapraia
+    if (resolvedClienteId === 'sabordapraia') {
+        hasPizzas = false;
+        hasMeats = false;
+    }
+
+    // Se o estabelecimento NÃO vende pizza, remove chaves e referências a pizza dos padrões
+    if (!hasPizzas || resolvedClienteId === 'sabordapraia') {
+        hasPizzas = false;
+        delete padroes.escolhaModoPizza;
+        delete padroes.escolhaSegundaMetade;
+        delete padroes.escolhaBorda;
+
+        if (padroes.infoRestaurante) {
+            padroes.infoRestaurante = padroes.infoRestaurante
+                .replace(/🍕 \*Horário da Noite \(Pizzaria\):\* \{horarioJantar\}/g, '🌙 *Horário da Noite:* {horarioJantar}')
+                .replace(/🍕 \*Horário da Noite:\* \{horarioJantar\}/g, '🌙 *Horário da Noite:* {horarioJantar}');
+        }
+    }
+
+    const mensagens = { ...padroes };
+    const customizadas = {};
+
+    // 3. Supabase mensagens_bot (fonte da verdade de edições do cliente)
+    try {
+        const { data: rowsMen } = await supabase
+            .from('mensagens_bot')
+            .select('chave, conteudo')
+            .eq('cliente_id', resolvedClienteId);
+
+        (rowsMen || []).forEach(m => {
+            if (m && m.chave) {
+                if (!hasPizzas && (m.chave === 'escolhaModoPizza' || m.chave === 'escolhaSegundaMetade' || m.chave === 'escolhaBorda')) {
+                    return;
+                }
+                const conteudoStr = String(m.conteudo !== undefined ? m.conteudo : '').trim();
+                if (conteudoStr !== '') {
+                    mensagens[m.chave] = m.conteudo;
+                    customizadas[m.chave] = true;
+                }
+            }
+        });
+    } catch (e) {
+        // Tabela pode estar indisponível ou offline
+    }
+
+    if (!hasPizzas) {
+        delete mensagens.escolhaModoPizza;
+        delete mensagens.escolhaSegundaMetade;
+        delete mensagens.escolhaBorda;
+    }
+
+    return {
+        clienteId: resolvedClienteId,
+        niche: nichoAlvo,
+        hasPizzas,
+        hasMeats,
+        realCategories,
+        mensagens,
+        padroes,
+        customizadas
+    };
+}
+
+async function salvarMensagensBot(payload, clienteId = CLIENTE_ID) {
+    const resolvedClienteId = (clienteId || CLIENTE_ID || 'default').toLowerCase().trim();
+    let lista = [];
+
+    if (Array.isArray(payload)) {
+        lista = payload;
+    } else if (payload && Array.isArray(payload.mensagens)) {
+        lista = payload.mensagens;
+    } else if (payload && payload.mensagens && typeof payload.mensagens === 'object') {
+        lista = Object.entries(payload.mensagens).map(([chave, conteudo]) => ({ chave, conteudo }));
+    } else if (payload && typeof payload === 'object') {
+        lista = Object.entries(payload).map(([chave, conteudo]) => ({ chave, conteudo }));
+    }
+
+    const salvar = [];
+    const remover = [];
+
+    lista.forEach(item => {
+        const chave = String(item.chave || '').trim();
+        if (!chave) return;
+        const conteudo = String(item.conteudo !== undefined ? item.conteudo : '');
+        const ehParaRestaurar = Boolean(item.restaurar) || conteudo.trim() === '';
+
+        if (ehParaRestaurar) {
+            remover.push(chave);
+        } else {
+            salvar.push({ chave, conteudo });
+        }
+    });
+
+    try {
+        if (remover.length > 0) {
+            await supabase
+                .from('mensagens_bot')
+                .delete()
+                .eq('cliente_id', resolvedClienteId)
+                .in('chave', remover);
+        }
+
+        if (salvar.length > 0) {
+            const rows = salvar.map(v => ({
+                cliente_id: resolvedClienteId,
+                chave: v.chave,
+                conteudo: v.conteudo,
+                updated_at: new Date().toISOString()
+            }));
+
+            await supabase
+                .from('mensagens_bot')
+                .upsert(rows, { onConflict: 'cliente_id,chave' });
+        }
+    } catch (err) {
+        console.warn('⚠️ [SUPABASE] Erro ao sincronizar mensagens_bot:', err.message);
+    }
+
+    const resolvidas = await getMensagensResolvidas(resolvedClienteId, cacheLocal.niche);
+    cacheLocal.config.mensagens = resolvidas.mensagens;
+
+    return {
+        success: true,
+        salvas: salvar.length,
+        removidas: remover.length,
+        mensagens: resolvidas.mensagens,
+        padroes: resolvidas.padroes,
+        customizadas: resolvidas.customizadas
+    };
+}
+
 module.exports = {
     inicializarDatabase,
     sincronizarComSupabase,
@@ -1580,5 +1172,8 @@ module.exports = {
     getAgendamentosCliente,
     getTodosAgendamentos,
     getHorariosDisponiveis,
-    getProximosDiasDisponiveis
+    getProximosDiasDisponiveis,
+    carregarMensagensDoNicho,
+    getMensagensResolvidas,
+    salvarMensagensBot
 };

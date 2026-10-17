@@ -13,29 +13,66 @@ console.log(`💡 [ENGINE] Motor Único carregado (niche lido do Supabase em tem
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname, '..');
 
 // ── Supabase: publica status do bot para o Painel Vercel via Realtime ─────
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+                  || process.env.SUPABASE_SERVICE_KEY
+                  || process.env.SUPABASE_KEY
+                  || process.env.SUPABASE_ANON_KEY;
+
 let _supabaseClient = null;
 function getSupabase() {
     if (_supabaseClient) return _supabaseClient;
     try {
         const { createClient } = require('@supabase/supabase-js');
-        const url = process.env.SUPABASE_URL;
-        const key = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
-        if (!url || !key) { console.warn('[BOT_STATUS] SUPABASE_URL ou SUPABASE_SERVICE_KEY não definidas — status não publicado.'); return null; }
-        _supabaseClient = createClient(url, key, { auth: { persistSession: false } });
+        if (!supabaseUrl || !supabaseKey) { console.warn('[BOT_STATUS] SUPABASE_URL ou SUPABASE_SERVICE_KEY não definidas — status não publicado.'); return null; }
+        _supabaseClient = createClient(supabaseUrl, supabaseKey, { auth: { persistSession: false } });
     } catch(e) { console.warn('[BOT_STATUS] Supabase não disponível:', e.message); }
     return _supabaseClient;
 }
 
-async function publicarStatusBot(clienteId, campos) {
+/**
+ * Publica o status do bot (QR, READY, DISCONNECTED, etc.) na tabela
+ * bot_status — o Painel Vercel lê via Realtime.
+ */
+async function publicarStatusBot(clienteId, dadosStatus) {
+    if (!supabaseUrl || !supabaseKey) {
+        console.error(`[BOT_STATUS] SUPABASE_URL ou SUPABASE_SERVICE_KEY não definidas — status não publicado.`);
+        return;
+    }
+
     const sb = getSupabase();
     if (!sb || !clienteId) return;
+
     try {
         await sb.from('bot_status').upsert(
-            { cliente_id: clienteId, ...campos, updated_at: new Date().toISOString() },
+            { cliente_id: clienteId, ...dadosStatus, updated_at: new Date().toISOString() },
             { onConflict: 'cliente_id' }
         );
+        console.log(`[BOT_STATUS] ✅ Status publicado no Supabase para ${clienteId}: ${dadosStatus.status}`);
     } catch(e) {
         console.warn('[BOT_STATUS] Erro ao publicar status:', e.message);
+    }
+}
+
+/**
+ * Remove a pasta de sessão do WhatsApp (.wwebjs_auth_<CLIENTE_ID>)
+ * para forçar a geração de um novo QR Code sem cache residual.
+ */
+function limparSessaoAuth() {
+    try {
+        const clienteId = process.env.CLIENTE_ID;
+        const authPath  = process.env.WWEBJS_AUTH_PATH
+            ? path.resolve(APP_DIR, process.env.WWEBJS_AUTH_PATH)
+            : path.join(APP_DIR, `.wwebjs_auth_${clienteId || 'default'}`);
+
+        if (fs.existsSync(authPath)) {
+            fs.rmSync(authPath, { recursive: true, force: true });
+            console.log(`🗑️  [AUTH] Pasta de sessão removida: ${authPath}`);
+        } else {
+            console.log(`ℹ️  [AUTH] Pasta de sessão não encontrada (já limpa): ${authPath}`);
+        }
+    } catch (e) {
+        console.warn('[AUTH] Erro ao remover pasta de sessão:', e.message);
     }
 }
 
@@ -130,12 +167,14 @@ class WhatsAppManager {
                 : path.join(APP_DIR, '.wwebjs_auth');
             console.log(`📁 [AUTH] Sessão WhatsApp: ${authPath}`);
 
+            // A partir daqui o Puppeteer usa o Chromium embutido do projeto
+            // (executablePath removido). A detecção abaixo é apenas informativa.
             const chromeExec = findChromeExecutable();
 
             if (chromeExec) {
-                console.log(`🌐 [NAVEGADOR] Usando: ${chromeExec}`);
+                console.log(`🌐 [NAVEGADOR] Chromium embutido do Puppeteer (navegador do sistema detectado: ${chromeExec})`);
             } else {
-                console.warn(`⚠️ [AVISO] Chrome ou Edge não encontrados nas pastas padrão. Tentando inicialização direta...`);
+                console.log('🌐 [NAVEGADOR] Chromium embutido do Puppeteer');
             }
 
             this.client = new Client({
@@ -143,8 +182,7 @@ class WhatsAppManager {
                     dataPath: authPath
                 }),
                 puppeteer: {
-                    headless: true,
-                    executablePath: chromeExec,
+                    headless: 'new',
                     args: [
                         '--no-sandbox',
                         '--disable-setuid-sandbox',
@@ -220,10 +258,25 @@ class WhatsAppManager {
             this.emit('status_change', statusObj);
         });
 
-        this.client.on('auth_failure', (msg) => {
-            this.status = 'AUTH_FAILURE';
-            console.error("❌ Falha de autenticação:", msg);
+        this.client.on('auth_failure', async (msg) => {
+            this.status = 'DISCONNECTED';
+            this.currentQr = null;
+            this.currentQrImage = null;
+            this.userInfo = null;
+            console.error('❌ [AUTH FAILURE] Falha de autenticação:', msg);
             this.emit('status_change', { status: this.status, error: msg });
+
+            // ── Publica DISCONNECTED no Supabase ──────────────────────────────
+            await publicarStatusBot(process.env.CLIENTE_ID, {
+                status:    'DISCONNECTED',
+                qr_string: null,
+                qr_image:  null,
+                user_info: null,
+                error_msg: `Auth failure: ${msg}`
+            }).catch(() => {});
+
+            // ── Apaga sessão para forçar novo QR Code limpo ──────────────────
+            limparSessaoAuth();
         });
 
         // Evento de Conexão Pronta
@@ -252,17 +305,18 @@ class WhatsAppManager {
 
             // ── Publica READY no Supabase ────────────────────────────────
             publicarStatusBot(process.env.CLIENTE_ID, {
-                status: 'READY',
-                qr_string: null,
-                qr_image: null,
-                user_info: this.userInfo,
-                error_msg: null
+                status:     'READY',
+                qr_string:  null,
+                qr_image:   null,
+                user_info:  this.userInfo,
+                error_msg:  null,
+                engine_url: `http://localhost:${process.env.PORT || 3001}`  // permite painel resolver sem config manual
             }).catch(() => {});
         });
 
         // Evento de Desconexão Automática (celular ou painel)
         this.client.on('disconnected', async (reason) => {
-            console.log("⚠️ [WHATSAPP DESCONECTADO] Motivo:", reason);
+            console.log('⚠️ [WHATSAPP DESCONECTADO] Motivo:', reason);
             this.status = 'DISCONNECTED';
             this.userInfo = null;
             this.currentQr = null;
@@ -273,22 +327,25 @@ class WhatsAppManager {
                 message: 'WhatsApp desconectado. Gerando novo QR Code...' 
             });
 
-            // ── Publica DISCONNECTED no Supabase ─────────────────────────
+            // ── Publica DISCONNECTED no Supabase ──────────────────────────────
             publicarStatusBot(process.env.CLIENTE_ID, {
-                status: 'DISCONNECTED',
+                status:    'DISCONNECTED',
                 qr_string: null,
-                qr_image: null,
+                qr_image:  null,
                 user_info: null,
                 error_msg: `Desconectado: ${reason}`
             }).catch(() => {});
 
+            // ── Apaga sessão para forçar novo QR Code limpo ──────────────────
+            limparSessaoAuth();
+
             // Aguarda liberação dos arquivos do Chrome e reinicia para gerar novo QR Code
             setTimeout(async () => {
                 try {
-                    console.log("🔄 [RECONEXÃO AUTOMÁTICA] Inicializando novo leitor de QR Code...");
+                    console.log('🔄 [RECONEXÃO AUTOMÁTICA] Inicializando novo leitor de QR Code...');
                     await this.restart();
                 } catch (err) {
-                    console.error("Erro ao reiniciar cliente após desconexão:", err.message);
+                    console.error('Erro ao reiniciar cliente após desconexão:', err.message);
                 }
             }, 2500);
         });

@@ -8,28 +8,187 @@
 // Usa as tabelas existentes: cardapio (itens) e pedidos (transações).
 // =====================================================================
 
+const { createClient } = require('@supabase/supabase-js');
 const db = require('./database');
 const { getNicheConfig, getNicheTerms, getNicheFlow } = require('./niches');
+const { carregarTenant } = require('./tenants');
 
-// ── Cache de niche (lido do Supabase, atualizado a cada 5 min) ──────
-let _cachedNiche = null;
-let _nicheTimestamp = 0;
-const NICHE_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+// ── Cliente Supabase (Conexão direta) ────────────────────────────────
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+                  || process.env.SUPABASE_SERVICE_KEY
+                  || process.env.SUPABASE_KEY
+                  || process.env.SUPABASE_ANON_KEY;
 
-function getNiche() {
+const supabase = createClient(supabaseUrl, supabaseKey, {
+    auth: { persistSession: false }
+});
+
+// ── Cache de tenant / niche (lido estritamente do Supabase) ──────────
+let _cachedCliente = null;
+let _clienteTimestamp = 0;
+const CLIENTE_CACHE_TTL = 60 * 1000; // 1 minuto de cache
+
+async function obterClienteSupabase() {
     const now = Date.now();
-    if (_cachedNiche && (now - _nicheTimestamp) < NICHE_CACHE_TTL) {
-        return _cachedNiche;
+    if (_cachedCliente && (now - _clienteTimestamp) < CLIENTE_CACHE_TTL) {
+        return _cachedCliente;
     }
-    _cachedNiche = db.getNiche() || 'delivery';
-    _nicheTimestamp = now;
-    return _cachedNiche;
+
+    const { data: cliente, error } = await supabase
+        .from('clientes')
+        .select('*')
+        .eq('id', process.env.CLIENTE_ID)
+        .single();
+
+    if (error || !cliente || !cliente.niche) {
+        console.error(`[ENGINE] ❌ ERRO CRÍTICO: Nicho não configurado no Supabase para o cliente ${process.env.CLIENTE_ID}`);
+        return null; // Interrompe em vez de carregar fallback de delivery
+    }
+
+    _cachedCliente = cliente;
+    _clienteTimestamp = now;
+    return _cachedCliente;
+}
+
+async function getNiche() {
+    const cliente = await obterClienteSupabase();
+    if (!cliente || !cliente.niche) {
+        return null;
+    }
+    return cliente.niche;
 }
 
 // Força atualização do cache (útil após sincronização)
 function refreshNicheCache() {
-    _nicheTimestamp = 0;
-    return getNiche();
+    _clienteTimestamp = 0;
+    _cachedCliente = null;
+}
+
+// ── Consultas Diretas ao Supabase (filtrando por cliente_id) ─────────
+async function buscarCategoriasSupabase(apenasAtivas = true) {
+    const clienteId = process.env.CLIENTE_ID;
+    let query = supabase
+        .from('categorias')
+        .select('*')
+        .eq('cliente_id', clienteId)
+        .order('ordem', { ascending: true });
+
+    if (apenasAtivas) {
+        query = query.eq('ativo', true);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+        console.error(`[ENGINE] ❌ Erro ao buscar categorias no Supabase para ${clienteId}:`, error.message);
+        return [];
+    }
+
+    return (data || []).map(r => ({
+        id:    r.categoria_id,
+        nome:  r.nome,
+        icone: r.icone || '🍽️',
+        turno: r.turno || 'todos',
+        ordem: r.ordem || 0,
+        ativo: r.ativo !== false
+    }));
+}
+
+async function buscarMenuSupabase(filtro = {}) {
+    const clienteId = process.env.CLIENTE_ID;
+    let query = supabase
+        .from('cardapio')
+        .select('*')
+        .eq('cliente_id', clienteId)
+        .order('ordem', { ascending: true });
+
+    if (filtro.categoria) {
+        query = query.eq('categoria', filtro.categoria);
+    }
+    if (filtro.apenasAtivos !== false) {
+        query = query.eq('ativo', true);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+        console.error(`[ENGINE] ❌ Erro ao buscar menu/serviços no Supabase para ${clienteId}:`, error.message);
+        return [];
+    }
+
+    let itens = (data || []).map(r => ({
+        id:        r.item_id,
+        categoria: r.categoria,
+        nome:      r.nome,
+        descricao: r.descricao || '',
+        preco:     Number(r.preco),
+        turno:     r.turno || 'todos',
+        icone:     r.icone || '🍽️',
+        ativo:     r.ativo !== false
+    }));
+
+    if (filtro.turno && filtro.turno !== 'todos') {
+        itens = itens.filter(i => i.turno === filtro.turno || i.turno === 'todos');
+    }
+
+    return itens;
+}
+
+async function buscarServicosSupabase(filtro = {}) {
+    const clienteId = process.env.CLIENTE_ID;
+    let query = supabase
+        .from('servicos')
+        .select('*')
+        .eq('cliente_id', clienteId);
+
+    if (filtro.categoria) {
+        query = query.eq('categoria', filtro.categoria);
+    }
+    if (filtro.apenasAtivos !== false) {
+        query = query.eq('ativo', true);
+    }
+
+    const { data, error } = await query;
+    if (error) {
+        console.error(`[ENGINE] ❌ Erro ao buscar serviços no Supabase para ${clienteId}:`, error.message);
+        return [];
+    }
+
+    if (!data || data.length === 0) {
+        return [];
+    }
+
+    return data.map(r => ({
+        id:        r.id,
+        categoria: r.categoria,
+        nome:      r.nome,
+        descricao: r.descricao || '',
+        preco:     Number(r.preco) || 0,
+        turno:     'todos',
+        icone:     r.icone || '✂️',
+        ativo:     r.ativo !== false
+    }));
+}
+
+async function buscarOpcoesExtrasSupabase(tipo) {
+    const clienteId = process.env.CLIENTE_ID;
+    const { data, error } = await supabase
+        .from('opcoes_extras')
+        .select('*')
+        .eq('cliente_id', clienteId)
+        .eq('tipo', tipo)
+        .eq('ativo', true);
+
+    if (error) {
+        console.error(`[ENGINE] ❌ Erro ao buscar opções extras (${tipo}) no Supabase para ${clienteId}:`, error.message);
+        return [];
+    }
+
+    return (data || []).map(o => ({
+        id:    o.opcao_id,
+        nome:  o.nome,
+        preco: Number(o.preco) || 0,
+        ativo: o.ativo !== false
+    }));
 }
 
 // Interpolação flexível de variáveis em templates de texto (ex: {nome}, {codigo}, {total})
@@ -71,15 +230,37 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
     const mensagemLower = mensagemLimpa.toLowerCase();
     const mensagemSemPontuacao = mensagemLower.replace(/[!?.,;]/g, '').trim();
 
-    const config = db.getConfig();
-    const mensagens = config.mensagens || {};
-    const estado = db.getEstadoConversa(from);
+    // ── Validação estrita do tenant e nicho no Supabase ────────────
+    const cliente = await obterClienteSupabase();
+    if (!cliente || !cliente.niche) {
+        console.error(`[ENGINE] ❌ ERRO CRÍTICO: Nicho não configurado no Supabase para o cliente ${process.env.CLIENTE_ID}`);
+        return; // Interrompe em vez de carregar fallback de delivery
+    }
 
-    // ── Nicho em tempo de execução ─────────────────────────────────
-    const niche = getNiche();
+    const niche = cliente.niche;
     const nicheConfig = getNicheConfig(niche);
+    if (!nicheConfig) {
+        console.error(`[ENGINE] ❌ ERRO CRÍTICO: Nicho "${niche}" não registrado no sistema para o cliente ${process.env.CLIENTE_ID}`);
+        return; // Interrompe em vez de carregar fallback de delivery
+    }
+
     const terms = getNicheTerms(niche);
     const flow = getNicheFlow(niche);
+
+    const config = db.getConfig();
+    config.nomeRestaurante   = cliente.nome || config.nomeRestaurante || 'Estabelecimento';
+    config.nomeSalao         = cliente.nome || config.nomeSalao || 'Estabelecimento';
+    config.numeroDono        = cliente.telefone_dono || config.numeroDono || '';
+    config.chavePix          = cliente.chave_pix || config.chavePix || '';
+    config.endereco          = cliente.endereco || config.endereco || '';
+    config.taxaEntregaPadrao = Number(cliente.taxa_entrega) || config.taxaEntregaPadrao || 0;
+    config.horarioAlmoco     = cliente.horario_almoco || config.horarioAlmoco || '';
+    config.horarioJantar     = cliente.horario_jantar || config.horarioJantar || '';
+    config.fechadoHoje       = Boolean(cliente.fechado_hoje);
+    config.motivoFechado     = cliente.motivo_fechado || config.motivoFechado || '';
+
+    const mensagens = config.mensagens || {};
+    const estado = db.getEstadoConversa(from);
 
     const logEvento = (tipo, detalhe) => {
         if (emitEvent) {
@@ -138,6 +319,38 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
 
     // 2. Se o cliente estiver sem estado ativo (idle)
     if (!estado || estado.status === 'idle' || !estado.status) {
+        const tenant = obterTenantAtivo(config);
+
+        const contextTenant = {
+            numOpcao,
+            mensagemLimpa,
+            mensagemLower,
+            mensagemSemPontuacao,
+            from,
+            nomeCliente,
+            config,
+            responder,
+            actions: {
+                listarCategorias: () => flow === 'order' ? iniciarFluxoPedido(responder, from, config, terms) : iniciarFluxoAgendamento(responder, from, config, terms),
+                iniciarFluxoPedido: () => flow === 'order' ? iniciarFluxoPedido(responder, from, config, terms) : iniciarFluxoAgendamento(responder, from, config, terms),
+                enviarCardapioCompleto: () => enviarCardapioCompleto(responder, config, terms),
+                consultarStatusPedido: () => consultarStatusPedido(responder, from, nomeCliente, config, terms),
+                enviarInfoRestaurante: () => enviarInfoEstabelecimento(responder, config, terms),
+                processarFluxoCancelamento: () => processarFluxoCancelamento(responder, from, nomeCliente, config, terms, emitEvent, notificarDono),
+                enviarMenuPrincipal: () => enviarMenuPrincipal(responder, nomeCliente, config, terms)
+            },
+            helpers: {
+                formatarTexto,
+                formatarMoeda,
+                extrairNumeroOpcao,
+                db
+            }
+        };
+
+        if (typeof tenant.tratarOpcaoMenuPrincipal === 'function') {
+            return await tenant.tratarOpcaoMenuPrincipal(contextTenant);
+        }
+
         const triggerRegex = flow === 'order'
             ? /(pedir|pedido|marmita|marmitex|pizza|comida|fazer pedido|delivery|lanche)/i
             : /(agendar|agendamento|horario|horário|marcar|consulta|servico|serviço|corte|barba)/i;
@@ -177,11 +390,16 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
 // FLUXO ORDER — Delivery (cardápio → item → carrinho → entrega)
 // =====================================================================
 async function processarFluxoOrder({ responder, from, nomeCliente, estado, config, mensagens, terms, numOpcao, mensagemLimpa, mensagemLower, emitEvent, notificarDono }) {
+    const tenant = obterTenantAtivo(config);
+    const clienteId = String(process.env.CLIENTE_ID || config?.clienteId || tenant?.id || '').toLowerCase();
+    const isSaborDaPraia = clienteId === 'sabordapraia';
+    const hasPizzas = !isSaborDaPraia && (tenant?.hasPizzas !== false) && (config?.hasPizzas !== false);
+
     switch (estado.status) {
 
         // ---- ETAPA 1: ESCOLHA DA CATEGORIA DO CARDÁPIO ----
         case 'waiting_category': {
-            const categorias = db.getCategorias(true);
+            const categorias = await buscarCategoriasSupabase(true);
             let categoriaEscolhida = null;
 
             if (numOpcao !== null && numOpcao >= 1 && numOpcao <= categorias.length) {
@@ -200,7 +418,7 @@ async function processarFluxoOrder({ responder, from, nomeCliente, estado, confi
                 );
             }
 
-            const itensCategoria = db.getCardapio({ categoria: categoriaEscolhida.id });
+            const itensCategoria = await buscarMenuSupabase({ categoria: categoriaEscolhida.id });
             if (itensCategoria.length === 0) {
                 return await responder(`Nenhum item disponível nesta categoria no momento. Digite *MENU* para voltar.`);
             }
@@ -241,7 +459,7 @@ async function processarFluxoOrder({ responder, from, nomeCliente, estado, confi
 
             // Se o item for da categoria Marmitex, pergunta a carne/acompanhamento
             if (itemEscolhido.categoria === 'marmitex') {
-                const carnesRaw = config.opcoesCarnes || [];
+                const carnesRaw = await buscarOpcoesExtrasSupabase('carne');
                 const carnes = carnesRaw.filter(c => c.ativo !== false).map(c => typeof c === 'string' ? c : c.nome);
 
                 if (carnes.length > 0) {
@@ -264,8 +482,8 @@ async function processarFluxoOrder({ responder, from, nomeCliente, estado, confi
                 }
             }
 
-            // Se for Pizza, pergunta se quer Inteira ou Meio a Meio (2 Sabores)
-            if (itemEscolhido.categoria === 'pizza') {
+            // Se for Pizza E o estabelecimento trabalhar com pizzas (hasPizzas = true)
+            if (hasPizzas && itemEscolhido.categoria === 'pizza') {
                 db.setEstadoConversa(from, {
                     ...estado,
                     status: 'waiting_pizza_mode',
@@ -280,7 +498,7 @@ async function processarFluxoOrder({ responder, from, nomeCliente, estado, confi
                 );
             }
 
-            // Bebidas ou itens sem customização
+            // Itens de lanchonete, pratos executivos, porções, pastéis, bebidas ou itens normais
             db.setEstadoConversa(from, {
                 ...estado,
                 status: 'waiting_quantity',
@@ -288,8 +506,9 @@ async function processarFluxoOrder({ responder, from, nomeCliente, estado, confi
                 customizacao: ''
             });
 
+            const iconeItem = itemEscolhido.icone || (itemEscolhido.categoria === 'bebidas' ? '🥤' : '🍽️');
             return await responder(
-                `🥤 *${itemEscolhido.nome}* (${formatarMoeda(itemEscolhido.preco)})\n\n` +
+                `${iconeItem} *${itemEscolhido.nome}* (${formatarMoeda(itemEscolhido.preco)})\n\n` +
                 `Quantas unidades você deseja?\n` +
                 `_Digite a quantidade (Ex: 1, 2, 3...):_`
             );
@@ -297,12 +516,28 @@ async function processarFluxoOrder({ responder, from, nomeCliente, estado, confi
 
         // ---- ETAPA 2.1: MODO PIZZA (INTEIRA OU MEIO A MEIO) ----
         case 'waiting_pizza_mode': {
+            if (!hasPizzas) {
+                const item = estado.primeiroSabor || estado.itemEmEdicao;
+                db.setEstadoConversa(from, {
+                    ...estado,
+                    status: 'waiting_quantity',
+                    itemEmEdicao: item,
+                    customizacao: ''
+                });
+                const icone = item?.icone || '🍽️';
+                return await responder(
+                    `${icone} *${item?.nome || 'Item'}* (${formatarMoeda(item?.preco || 0)})\n\n` +
+                    `Quantas unidades você deseja?\n` +
+                    `_Digite a quantidade (Ex: 1, 2, 3...):_`
+                );
+            }
+
             const primeiroSabor = estado.primeiroSabor;
 
             if (numOpcao === 1 || mensagemLower.includes('inteira') || mensagemLower === '1') {
                 return await avancarParaBordasPizza(responder, from, estado, config, primeiroSabor);
             } else if (numOpcao === 2 || mensagemLower.includes('meio') || mensagemLower.includes('2') || mensagemLower.includes('segundo')) {
-                const todasPizzas = db.getCardapio({ categoria: 'pizza' });
+                const todasPizzas = await buscarMenuSupabase({ categoria: 'pizza' });
                 db.setEstadoConversa(from, {
                     ...estado,
                     status: 'waiting_pizza_second_half',
@@ -328,7 +563,23 @@ async function processarFluxoOrder({ responder, from, nomeCliente, estado, confi
 
         // ---- ETAPA 2.2: ESCOLHA DO SEGUNDO SABOR DA PIZZA ----
         case 'waiting_pizza_second_half': {
-            const todasPizzas = estado.pizzasDisponiveis || db.getCardapio({ categoria: 'pizza' });
+            if (!hasPizzas) {
+                const item = estado.primeiroSabor || estado.itemEmEdicao;
+                db.setEstadoConversa(from, {
+                    ...estado,
+                    status: 'waiting_quantity',
+                    itemEmEdicao: item,
+                    customizacao: ''
+                });
+                const icone = item?.icone || '🍽️';
+                return await responder(
+                    `${icone} *${item?.nome || 'Item'}* (${formatarMoeda(item?.preco || 0)})\n\n` +
+                    `Quantas unidades você deseja?\n` +
+                    `_Digite a quantidade (Ex: 1, 2, 3...):_`
+                );
+            }
+
+            const todasPizzas = estado.pizzasDisponiveis || await buscarMenuSupabase({ categoria: 'pizza' });
             const index = numOpcao !== null ? numOpcao - 1 : -1;
 
             if (index < 0 || index >= todasPizzas.length) {
@@ -384,6 +635,22 @@ async function processarFluxoOrder({ responder, from, nomeCliente, estado, confi
 
         // ---- ETAPA 2.2: CUSTOMIZAÇÃO PIZZA (BORDA / OBS) ----
         case 'waiting_customization_pizza': {
+            if (!hasPizzas) {
+                const item = estado.itemEmEdicao || estado.primeiroSabor;
+                db.setEstadoConversa(from, {
+                    ...estado,
+                    status: 'waiting_quantity',
+                    itemEmEdicao: item,
+                    customizacao: ''
+                });
+                const icone = item?.icone || '🍽️';
+                return await responder(
+                    `${icone} *${item?.nome || 'Item'}* (${formatarMoeda(item?.preco || 0)})\n\n` +
+                    `Quantas unidades você deseja?\n` +
+                    `_Digite a quantidade (Ex: 1, 2, 3...):_`
+                );
+            }
+
             const bordas = estado.bordasDisponiveis || [];
             let bordaObs = 'Sem borda extra';
             let acrescimo = 0;
@@ -467,7 +734,7 @@ async function processarFluxoOrder({ responder, from, nomeCliente, estado, confi
                     status: 'waiting_category'
                 });
 
-                const categorias = db.getCategorias(true);
+                const categorias = await buscarCategoriasSupabase(true);
                 let listaCats = categorias.map((c, i) => `${i + 1}. ${c.icone || '🍽️'} *${c.nome}*`).join('\n');
 
                 return await responder(
@@ -644,7 +911,12 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
 
         // ---- ETAPA 1: ESCOLHA DO SERVIÇO ----
         case 'waiting_service': {
-            const servicos = db.getCardapio({ apenasAtivos: true });
+            const servicos = await buscarServicosSupabase({ apenasAtivos: true });
+            if (!servicos || servicos.length === 0) {
+                db.limparEstadoConversa(from);
+                return await responder("Nenhum serviço cadastrado no momento.");
+            }
+
             let servicoEscolhido = null;
 
             if (numOpcao !== null && numOpcao >= 1 && numOpcao <= servicos.length) {
@@ -942,37 +1214,56 @@ async function salvarAgendamento({ telefone, nome, servico, profissional, data, 
 // MENUS E HELPERS GERAIS
 // =====================================================================
 
+// =====================================================================
+// Resolução do Tenant Ativo
+// =====================================================================
+function obterTenantAtivo(config = {}) {
+    const rawId = process.env.CLIENTE_ID || config?.clienteId || config?.id || '';
+    const idEnv = String(rawId).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
+
+    // Busca de forma totalmente dinâmica via loader dinâmico
+    if (idEnv) {
+        const tenantCustom = carregarTenant(idEnv);
+        if (tenantCustom) {
+            return tenantCustom;
+        }
+    }
+
+    // Fallback genérico seguro (default.js)
+    return carregarTenant('default');
+}
+
 async function enviarMenuPrincipal(responder, nomeCliente, config, terms) {
-    const mensagens = config.mensagens || {};
-    const fechadoHoje = db.isFechadoHoje();
-    let avisoFechado = '';
-    if (fechadoHoje) {
-        avisoFechado = formatarTexto(mensagens.fechadoAviso || `\n🛑 *AVISO:* O estabelecimento está fechado hoje ({motivo}).\n`, {
-            motivo: config.motivoFechado || 'Recesso/Descanso'
+    const tenant = obterTenantAtivo(config);
+
+    // 1️⃣ PRIMEIRA VERIFICAÇÃO: Executa tenant.getMenuPrincipal(...) se a função existir no tenant ativo
+    if (tenant && typeof tenant.getMenuPrincipal === 'function') {
+        const textoMenuTenant = tenant.getMenuPrincipal({
+            nomeCliente,
+            config,
+            db,
+            formatarTexto,
+            formatarMoeda
         });
+        return await responder(textoMenuTenant);
     }
 
-    // Nicho do cliente (buscado ANTES de gerar o aviso de turno)
-    const niche = getNiche();
-
-    // Aviso de turno só existe para delivery (Almoço/Jantar).
-    // Fora de delivery: avisoTurno fica vazio (linha totalmente suprimida).
-    const turno = db.getTurnoAtual(niche);
-    let avisoTurno = '';
-    if (turno) {
-        avisoTurno = `⏰ *Agora:* ${turno.icone} ${turno.nome} — _${turno.descricao}_\n`;
-    } else if (getNicheFlow(niche) === 'appointment') {
-        // Agendamento (barbershop/clinic/petshop/salon): apenas o horário
-        // normal, se estiver configurado pelo tenant.
-        const horario = db.getHorarioNormal();
-        if (horario) avisoTurno = `🕘 *Horário:* ${horario}\n`;
+    // 2️⃣ Se houver mensagem customizada salva no Supabase (Painel Master)
+    if (config?.mensagens?.menuPrincipal) {
+        const textoBanco = formatarTexto(config.mensagens.menuPrincipal, {
+            nome: nomeCliente || 'Cliente',
+            restaurante: (config.nomeRestaurante || 'Estabelecimento').toUpperCase()
+        });
+        return await responder(textoBanco);
     }
 
-    const textoMenu = formatarTexto(mensagens.menuPrincipal || `🍽️ *BEM-VINDO AO {restaurante}* 🍽️\n\nOlá, *{nome}*!\n\n{avisoTurno}\n{avisoFechado}\n1️⃣ 🛒 *Fazer Pedido*\n2️⃣ 📋 *Ver Cardápio*\n3️⃣ 🛵 *Status do Pedido*\n4️⃣ 📍 *Informações & Horários*\n5️⃣ ❌ *Cancelar Pedido*\n\n👉 _Digite o número da opção desejada:_`, {
-        restaurante: config.nomeRestaurante.toUpperCase(),
-        nome: nomeCliente,
-        avisoTurno: avisoTurno,
-        avisoFechado: avisoFechado
+    // 3️⃣ Fallback genérico adaptado (sem textos específicos hardcoded)
+    const templateDefault = (tenant && tenant.menuPrincipal) || 
+        `👋 *BEM-VINDO AO {restaurante}* 👋\n\nOlá, *{nome}*! Como podemos te ajudar hoje?\n\n1️⃣ 🛒 *Ver Opções / Fazer Pedido*\n2️⃣ 📋 *Ver Cardápio Completo*\n3️⃣ 📍 *Horários, Endereço & Pagamento*\n4️⃣ ❌ *Cancelar Pedido*\n\n👉 _Digite o número da opção desejada:_`;
+
+    const textoMenu = formatarTexto(templateDefault, {
+        restaurante: (config.nomeRestaurante || 'NOSSO ESTABELECIMENTO').toUpperCase(),
+        nome: nomeCliente || 'Cliente'
     });
 
     return await responder(textoMenu);
@@ -985,7 +1276,7 @@ async function iniciarFluxoPedido(responder, from, config, terms) {
         carrinho: []
     });
 
-    const categorias = db.getCategorias(true);
+    const categorias = await buscarCategoriasSupabase(true);
     let listaCats = categorias.map((c, i) => `${i + 1}. ${c.icone || '🍽️'} *${c.nome}*`).join('\n');
 
     return await responder(
@@ -998,16 +1289,23 @@ async function iniciarFluxoPedido(responder, from, config, terms) {
 
 async function iniciarFluxoAgendamento(responder, from, config, terms) {
     const mensagens = config.mensagens || {};
+    const servicos = await buscarServicosSupabase({ apenasAtivos: true });
+
+    if (!servicos || servicos.length === 0) {
+        db.limparEstadoConversa(from);
+        return await responder("Nenhum serviço cadastrado no momento.");
+    }
+
     db.setEstadoConversa(from, {
         status: 'waiting_service',
         agendamento: {}
     });
 
-    const servicos = db.getCardapio({ apenasAtivos: true });
     let listaServicos = servicos.map((s, i) => `${i + 1}. ${s.icone || '✂️'} *${s.nome}* — ${formatarMoeda(s.preco)}`).join('\n');
 
+    const nomeEstab = config.nomeSalao || config.nomeRestaurante || 'Estabelecimento';
     return await responder(
-        `✂️ *${config.nomeRestaurante}*\n` +
+        `✂️ *${nomeEstab}*\n` +
         `Olá! Escolha o serviço desejado:\n\n${listaServicos}\n\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `👉 Digite o *número* do serviço para agendar!\n\n` +
@@ -1016,8 +1314,30 @@ async function iniciarFluxoAgendamento(responder, from, config, terms) {
 }
 
 async function enviarCardapioCompleto(responder, config, terms) {
-    const cardapio = db.getCardapio();
-    const categorias = db.getCategorias(true);
+    const niche = await getNiche();
+    const flow = getNicheFlow(niche);
+
+    if (flow === 'appointment') {
+        const servicos = await buscarServicosSupabase({ apenasAtivos: true });
+        if (!servicos || servicos.length === 0) {
+            return await responder("Nenhum serviço cadastrado no momento.");
+        }
+
+        const nomeEstab = config.nomeSalao || config.nomeRestaurante || 'Estabelecimento';
+        let texto = `📋 *TABELA DE SERVIÇOS — ${nomeEstab.toUpperCase()}*\n\n`;
+        texto += servicos.map(s => {
+            const desc = s.descricao ? `\n  _${s.descricao}_` : '';
+            return `• ${s.icone || '✂️'} *${s.nome}* — ${formatarMoeda(s.preco)}${desc}`;
+        }).join('\n\n');
+
+        texto += `\n\n━━━━━━━━━━━━━━━━━━━━\n` +
+            `_Envie *1* para agendar um horário agora mesmo!_`;
+
+        return await responder(texto);
+    }
+
+    const cardapio = await buscarMenuSupabase();
+    const categorias = await buscarCategoriasSupabase(true);
 
     let texto = `📜 *CARDÁPIO COMPLETO — ${config.nomeRestaurante.toUpperCase()}*\n\n`;
 
@@ -1142,8 +1462,28 @@ async function enviarInfoEstabelecimento(responder, config, terms) {
 
 // Helper para avançar para a etapa de bordas / quantidade da pizza
 async function avancarParaBordasPizza(responder, from, estado, config, itemEmEdicao) {
+    const tenant = obterTenantAtivo(config);
+    const clienteId = String(process.env.CLIENTE_ID || config?.clienteId || tenant?.id || '').toLowerCase();
+    const isSaborDaPraia = clienteId === 'sabordapraia';
+    const hasPizzas = !isSaborDaPraia && (tenant?.hasPizzas !== false) && (config?.hasPizzas !== false);
+
+    if (!hasPizzas) {
+        db.setEstadoConversa(from, {
+            ...estado,
+            status: 'waiting_quantity',
+            itemEmEdicao: itemEmEdicao,
+            customizacao: ''
+        });
+        const icone = itemEmEdicao?.icone || '🍽️';
+        return await responder(
+            `${icone} *${itemEmEdicao.nome}* (${formatarMoeda(itemEmEdicao.preco)})\n\n` +
+            `Quantas unidades você deseja?\n` +
+            `_Digite a quantidade (Ex: 1, 2, 3...):_`
+        );
+    }
+
     const mensagens = config.mensagens || {};
-    const bordasRaw = config.opcoesBordas || [];
+    const bordasRaw = await buscarOpcoesExtrasSupabase('borda');
     const bordas = bordasRaw.filter(b => b.ativo !== false);
 
     if (bordas.length > 0) {

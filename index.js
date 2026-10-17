@@ -7,12 +7,12 @@
 //   4. Escuta comandos do Painel Master via Supabase Realtime (~1s)
 // Arquitetura 100% Supabase — sem Cloudflare Tunnel, sem polling.
 // ================================================================
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
 const express      = require('express');
 const cors         = require('cors');
 const http         = require('http');
-const path         = require('path');
 const fs           = require('fs');
 
 const db                = require('./src/database');
@@ -87,11 +87,22 @@ app.post('/api/bot/logout', async (req, res) => {
 
 // ── Supabase Client (compartilhado) ──────────────────────────────
 const { createClient } = require('@supabase/supabase-js');
-const supabase = createClient(
-    process.env.SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_KEY,
-    { auth: { persistSession: false } }
-);
+
+// Lê as variáveis do Supabase com fallback para os nomes de chave comuns
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+                  || process.env.SUPABASE_KEY
+                  || process.env.SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+    console.error(`[ENGINE] ❌ ERRO: SUPABASE_URL ou SUPABASE_KEY não foram encontradas no process.env!`);
+    console.error(`Valores atuais -> URL: ${supabaseUrl}, KEY: ${supabaseKey ? 'Definida' : 'Indefinida'}`);
+    process.exit(1);
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey, {
+    auth: { persistSession: false }
+});
 
 // ── Executar comando recebido do Painel Master ────────────────────
 async function executarComandoRemoto(payload) {
@@ -159,14 +170,28 @@ async function main() {
     console.log('======================================================');
     console.log('');
 
-    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY) {
-        console.error('❌ SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórias no .env!');
+    if (!supabaseUrl || !supabaseKey) {
+        console.error('❌ SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY (ou SUPABASE_KEY/SUPABASE_ANON_KEY) são obrigatórias no .env!');
         process.exit(1);
     }
     if (!process.env.CLIENTE_ID) {
         console.error('❌ CLIENTE_ID é obrigatório no .env!');
         process.exit(1);
     }
+
+    // ── Validação estrita do tenant e nicho no Supabase ──────────────
+    const { data: cliente, error } = await supabase
+        .from('clientes')
+        .select('niche, nome')
+        .eq('id', process.env.CLIENTE_ID)
+        .single();
+
+    if (error || !cliente || !cliente.niche) {
+        console.error(`[ENGINE] ❌ ERRO CRÍTICO: Nicho não configurado no Supabase para o cliente ${process.env.CLIENTE_ID}`);
+        return; // Interrompe em vez de carregar fallback de delivery
+    }
+
+    console.log(`✅ [ENGINE] Tenant validado no Supabase: "${cliente.nome}" | Nicho: "${cliente.niche}"`);
 
     // Inicializa banco de dados local (Supabase sync)
     await db.inicializarDatabase();
