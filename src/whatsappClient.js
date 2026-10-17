@@ -84,7 +84,13 @@ function findChromeExecutable() {
     } catch(e) {}
 
     const standardPaths = [
-        // Google Chrome
+        // Linux (Ubuntu, Debian, Hetzner, etc.)
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+
+        // Google Chrome (Windows)
         'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
         'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
         process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google', 'Chrome', 'Application', 'chrome.exe') : null,
@@ -167,32 +173,38 @@ class WhatsAppManager {
                 : path.join(APP_DIR, '.wwebjs_auth');
             console.log(`📁 [AUTH] Sessão WhatsApp: ${authPath}`);
 
-            // A partir daqui o Puppeteer usa o Chromium embutido do projeto
-            // (executablePath removido). A detecção abaixo é apenas informativa.
             const chromeExec = findChromeExecutable();
 
             if (chromeExec) {
-                console.log(`🌐 [NAVEGADOR] Chromium embutido do Puppeteer (navegador do sistema detectado: ${chromeExec})`);
+                console.log(`🌐 [NAVEGADOR] Usando navegador do sistema: ${chromeExec}`);
             } else {
                 console.log('🌐 [NAVEGADOR] Chromium embutido do Puppeteer');
+            }
+
+            const puppeteerConfig = {
+                headless: 'new',
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--disable-gpu',
+                    '--disable-blink-features=AutomationControlled',
+                    '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+                ]
+            };
+
+            if (chromeExec) {
+                puppeteerConfig.executablePath = chromeExec;
             }
 
             this.client = new Client({
                 authStrategy: new LocalAuth({
                     dataPath: authPath
                 }),
-                puppeteer: {
-                    headless: 'new',
-                    args: [
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-accelerated-2d-canvas',
-                        '--no-first-run',
-                        '--no-zygote',
-                        '--disable-gpu'
-                    ]
-                }
+                puppeteer: puppeteerConfig
             });
 
             this.setupEventHandlers();
