@@ -204,6 +204,10 @@ class WhatsAppManager {
                 authStrategy: new LocalAuth({
                     dataPath: authPath
                 }),
+                webVersionCache: {
+                    type: 'remote',
+                    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1045790558-alpha.html'
+                },
                 puppeteer: puppeteerConfig
             });
 
