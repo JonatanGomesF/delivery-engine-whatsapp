@@ -69,7 +69,7 @@ function buildPm2Command(cliente, porta) {
     const cmd = [
         'pm2 start index.js',
         `--name "${name}"`,
-        '--max-memory-restart 450M',
+        '--max-memory-restart 800M',
         '--log-date-format "YYYY-MM-DD HH:mm:ss"'
     ].join(' ');
 

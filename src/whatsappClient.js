@@ -191,16 +191,6 @@ class WhatsAppManager {
                     '--no-first-run',
                     '--no-zygote',
                     '--disable-gpu',
-                    '--disable-extensions',
-                    '--disable-default-apps',
-                    '--disable-component-update',
-                    '--disable-background-networking',
-                    '--disable-sync',
-                    '--disable-translate',
-                    '--metrics-recording-only',
-                    '--mute-audio',
-                    '--renderer-process-limit=1',
-                    '--js-flags=--max-old-space-size=256',
                     '--disable-blink-features=AutomationControlled',
                     '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
                 ]
@@ -214,10 +204,6 @@ class WhatsAppManager {
                 authStrategy: new LocalAuth({
                     dataPath: authPath
                 }),
-                webVersionCache: {
-                    type: 'remote',
-                    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1045790558-alpha.html'
-                },
                 puppeteer: puppeteerConfig
             });
 
