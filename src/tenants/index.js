@@ -11,7 +11,9 @@ const TENANTS_MAP = {
     'caoguarda': require('./caoguarda'),
     'sabordapraia': require('./sabordapraia'),
     'barbearia_estilo': require('./barbearia_estilo'),
-    'barbeariaestilo': require('./barbearia_estilo')
+    'barbeariaestilo': require('./barbearia_estilo'),
+    'barberestilo2': require('./barbearia_estilo'),
+    'barberestilo': require('./barbearia_estilo')
 };
 
 function normalizarClienteId(clienteId) {

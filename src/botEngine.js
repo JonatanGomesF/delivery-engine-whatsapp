@@ -932,51 +932,37 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
                 );
             }
 
-            db.setEstadoConversa(from, {
-                ...estado,
-                status: 'waiting_professional',
-                servico: servicoEscolhido
-            });
-
-            // Lista de profissionais (genérico — pode ser customizado por nicho no futuro)
-            const profissionais = getProfissionais(niche);
-            let listaProfissionais = profissionais.map((p, i) => `${i + 1}. ${p.emoji || '👤'} *${p.nome}* — _${p.especialidade}_`).join('\n');
-
-            return await responder(
-                `${servicoEscolhido.icone || '✂️'} *${servicoEscolhido.nome}* — ${formatarMoeda(servicoEscolhido.preco)}\n\n` +
-                `👤 *Escolha o profissional:*\n\n${listaProfissionais}\n\n` +
-                `_Digite o número ou envie *MENU* para voltar._`
-            );
-        }
-
-        // ---- ETAPA 2: ESCOLHA DO PROFISSIONAL ----
-        case 'waiting_professional': {
-            const profissionais = getProfissionais(niche);
-            let profissionalEscolhido = null;
-
-            if (numOpcao !== null && numOpcao >= 1 && numOpcao <= profissionais.length) {
-                profissionalEscolhido = profissionais[numOpcao - 1];
-            } else {
-                profissionalEscolhido = profissionais.find(p => mensagemLower.includes(p.nome.toLowerCase()));
-            }
-
-            if (!profissionalEscolhido) {
-                let listaProfissionais = profissionais.map((p, i) => `${i + 1}. ${p.emoji || '👤'} *${p.nome}*`).join('\n');
-                return await responder(`⚠️ Profissional não encontrado. Escolha:\n\n${listaProfissionais}`);
-            }
-
+            // Avança diretamente para a escolha da data (sem etapa de profissional)
             const dias = getProximosDias();
             db.setEstadoConversa(from, {
                 ...estado,
                 status: 'waiting_date',
-                profissional: profissionalEscolhido,
+                servico: servicoEscolhido,
+                profissional: null,
                 diasDisponiveis: dias
             });
 
             let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
             return await responder(
-                `👤 Profissional escolhido: *${profissionalEscolhido.nome}* (${profissionalEscolhido.especialidade})\n\n` +
-                `📅 *Escolha a data:*\n\n${listaDias}\n\n` +
+                `${servicoEscolhido.icone || '✂️'} *${servicoEscolhido.nome}* — ${formatarMoeda(servicoEscolhido.preco)}\n\n` +
+                `📅 *Escolha a data do atendimento:*\n\n${listaDias}\n\n` +
+                `_Digite o número do dia desejado ou envie *MENU* para voltar:_`
+            );
+        }
+
+        // ---- ETAPA 2: REDIRECIONAMENTO SEGURO (Caso venha estado residual) ----
+        case 'waiting_professional': {
+            const dias = getProximosDias();
+            db.setEstadoConversa(from, {
+                ...estado,
+                status: 'waiting_date',
+                profissional: null,
+                diasDisponiveis: dias
+            });
+
+            let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
+            return await responder(
+                `📅 *Escolha a data do atendimento:*\n\n${listaDias}\n\n` +
                 `_Digite o número do dia desejado:_`
             );
         }
@@ -995,7 +981,7 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
                 return await responder(`⚠️ Dia inválido. Escolha:\n\n${listaDias}`);
             }
 
-            const horarios = getHorariosDisponiveis();
+            const horarios = getHorariosDisponiveis(dataEscolhida);
             db.setEstadoConversa(from, {
                 ...estado,
                 status: 'waiting_time',
@@ -1013,7 +999,7 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
 
         // ---- ETAPA 4: ESCOLHA DO HORÁRIO ----
         case 'waiting_time': {
-            const horarios = estado.horariosDisponiveis || getHorariosDisponiveis();
+            const horarios = estado.horariosDisponiveis || getHorariosDisponiveis(estado.data);
             let horarioEscolhido = null;
 
             if (numOpcao !== null && numOpcao >= 1 && numOpcao <= horarios.length) {
@@ -1037,11 +1023,10 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
                 horario: horarioEscolhido
             });
 
-            const { servico, profissional, data } = estado;
+            const { servico, data } = estado;
             return await responder(
                 `✅ *Resumo do Agendamento:*\n\n` +
                 `${servico.icone || '✂️'} Serviço: *${servico.nome}*\n` +
-                `👤 Profissional: *${profissional.nome}*\n` +
                 `📅 Data: *${data.label}*\n` +
                 `⏰ Horário: *${horarioEscolhido}*\n` +
                 `💰 Valor: *${formatarMoeda(servico.preco)}*\n\n` +
@@ -1060,14 +1045,14 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
             }
 
             if (numOpcao === 1 || mensagemLower.includes('confirm') || mensagemLower.includes('sim') || mensagemLower.includes('ok')) {
-                const { servico, profissional, data, horario } = estado;
+                const { servico, data, horario } = estado;
                 db.limparEstadoConversa(from);
 
                 const resultado = await salvarAgendamento({
                     telefone: from,
                     nome: nomeCliente,
                     servico,
-                    profissional,
+                    profissional: null,
                     data,
                     horario,
                     preco: servico.preco,
@@ -1081,7 +1066,6 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
                     `👤 Cliente: ${nomeCliente}\n` +
                     `📱 Tel: ${from.replace('@c.us', '')}\n` +
                     `${servico.icone || '✂️'} Serviço: ${servico.nome}\n` +
-                    `👤 Profissional: ${profissional.nome}\n` +
                     `📅 Data: ${data.label} às ${horario}\n` +
                     `💰 Valor: ${formatarMoeda(servico.preco)}\n` +
                     `🔖 Código: ${codigo}`
@@ -1090,7 +1074,6 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
                 return await responder(
                     `🎉 *Agendamento Confirmado!*\n\n` +
                     `${servico.icone || '✂️'} *${servico.nome}*\n` +
-                    `👤 Profissional: *${profissional.nome}*\n` +
                     `📅 *${data.label}* às *${horario}*\n` +
                     `💰 Valor: *${formatarMoeda(servico.preco)}*\n\n` +
                     `🔖 Código: *${codigo}*\n\n` +
@@ -1116,63 +1099,84 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
 // HELPERS DO FLUXO APPOINTMENT
 // =====================================================================
 
-// Profissionais por nicho (pode ser customizado no futuro via Supabase)
+// Profissionais por nicho (retorna [] pois seleção de profissional foi removida)
 function getProfissionais(niche) {
-    const profissionaisPorNiche = {
-        barbershop: [
-            { id: 1, nome: 'Carlos', emoji: '💈', especialidade: 'Corte Degradê' },
-            { id: 2, nome: 'Ricardo', emoji: '✂️', especialidade: 'Barba & Acabamento' },
-            { id: 3, nome: 'Felipe', emoji: '🎨', especialidade: 'Pigmentação & Coloração' }
-        ],
-        clinic: [
-            { id: 1, nome: 'Dr. Silva', emoji: '🩺', especialidade: 'Clínico Geral' },
-            { id: 2, nome: 'Dra. Souza', emoji: '👩‍⚕️', especialidade: 'Dermatologia' },
-            { id: 3, nome: 'Dr. Lima', emoji: '👨‍⚕️', especialidade: 'Pediatria' }
-        ],
-        petshop: [
-            { id: 1, nome: 'Ana', emoji: '🐾', especialidade: 'Banho & Tosa' },
-            { id: 2, nome: 'Pedro', emoji: '✂️', especialidade: 'Tosa Higiênica' },
-            { id: 3, nome: 'Lucia', emoji: '💅', especialidade: 'Estética Animal' }
-        ],
-        salon: [
-            { id: 1, nome: 'Mariana', emoji: '💅', especialidade: 'Corte & Coloração' },
-            { id: 2, nome: 'Juliana', emoji: '✨', especialidade: 'Manicure & Pedicure' },
-            { id: 3, nome: 'Camila', emoji: '💇‍♀️', especialidade: 'Penteados' }
-        ]
-    };
-    return profissionaisPorNiche[niche] || profissionaisPorNiche['barbershop'];
+    return [];
 }
 
-// Próximos 7 dias úteis disponíveis (sem domingo)
+// Próximos dias disponíveis (iniciando em HOJE dia 0 se dentro do expediente)
 function getProximosDias() {
     const dias = [];
     const hoje = new Date();
-    let i = 0;
+
+    const horaAtual = hoje.getHours();
+    const minAtual = hoje.getMinutes();
+    const minutosAgora = horaAtual * 60 + minAtual;
+    const ultimoHorarioExpediente = 19 * 60 + 30; // 19:30
+
+    let offset = 0;
     while (dias.length < 7) {
-        i++;
         const d = new Date(hoje);
-        d.setDate(hoje.getDate() + i);
-        const dow = d.getDay();
+        d.setDate(hoje.getDate() + offset);
+        const dow = d.getDay(); // 0 = Domingo
+
         if (dow !== 0) {
             const dd = String(d.getDate()).padStart(2, '0');
             const mm = String(d.getMonth() + 1).padStart(2, '0');
             const yyyy = d.getFullYear();
-            const label = dow === 6 ? 'Sábado' : ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'][dow];
-            dias.push({ iso: `${yyyy}-${mm}-${dd}`, label: `${label} ${dd}/${mm}` });
+            const iso = `${yyyy}-${mm}-${dd}`;
+
+            if (offset === 0) {
+                // Se hoje ainda tiver expediente disponível, exibe "Hoje (DD/MM)" como opção 1
+                if (minutosAgora < ultimoHorarioExpediente) {
+                    dias.push({ iso, label: `Hoje (${dd}/${mm})`, isHoje: true });
+                }
+            } else {
+                const diaSemana = dow === 6 ? 'Sábado' : ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'][dow];
+                dias.push({ iso, label: `${diaSemana} ${dd}/${mm}`, isHoje: false });
+            }
         }
+        offset++;
     }
     return dias;
 }
 
-// Horários disponíveis (pode ser customizado por nicho no futuro)
-function getHorariosDisponiveis() {
-    return ['09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
-            '13:30', '14:00', '14:30', '15:00', '15:30', '16:00',
-            '16:30', '17:00', '17:30', '18:00', '18:30', '19:00'];
+// Horários disponíveis (filtra horários que já passaram se for HOJE)
+function getHorariosDisponiveis(dataEscolhida = null) {
+    const todosHorarios = [
+        '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
+        '13:30', '14:00', '14:30', '15:00', '15:30', '16:00',
+        '16:30', '17:00', '17:30', '18:00', '18:30', '19:00'
+    ];
+
+    if (!dataEscolhida) return todosHorarios;
+
+    const hoje = new Date();
+    const dd = String(hoje.getDate()).padStart(2, '0');
+    const mm = String(hoje.getMonth() + 1).padStart(2, '0');
+    const yyyy = hoje.getFullYear();
+    const hojeIso = `${yyyy}-${mm}-${dd}`;
+
+    const isoComparar = typeof dataEscolhida === 'string' ? dataEscolhida : dataEscolhida.iso;
+
+    if (isoComparar === hojeIso) {
+        const horaAtual = hoje.getHours();
+        const minAtual = hoje.getMinutes();
+        const minutosAgora = horaAtual * 60 + minAtual;
+
+        const restantes = todosHorarios.filter(h => {
+            const [hH, mM] = h.split(':').map(Number);
+            return (hH * 60 + mM) > minutosAgora;
+        });
+
+        return restantes.length > 0 ? restantes : todosHorarios;
+    }
+
+    return todosHorarios;
 }
 
 // Salva o agendamento na tabela `pedidos` com metadata.tipo = niche
-async function salvarAgendamento({ telefone, nome, servico, profissional, data, horario, preco, niche }) {
+async function salvarAgendamento({ telefone, nome, servico, profissional = null, data, horario, preco, niche }) {
     const config = db.getConfig();
     const codigo = `AGD-${Date.now().toString(36).toUpperCase()}`;
     const hoje = new Date().toISOString().split('T')[0];
@@ -1183,7 +1187,7 @@ async function salvarAgendamento({ telefone, nome, servico, profissional, data, 
         telefone: telefone,
         itens: [{
             id: servico.id,
-            nome: `${servico.icone || '✂️'} ${servico.nome} c/ ${profissional.nome}`,
+            nome: `${servico.icone || '✂️'} ${servico.nome}`,
             preco: preco,
             qtd: 1,
             observacao: `Agendamento: ${data.label} às ${horario}`,
@@ -1197,8 +1201,8 @@ async function salvarAgendamento({ telefone, nome, servico, profissional, data, 
         observacoes: JSON.stringify({
             tipo: niche,
             servico_id: servico.id,
-            profissional_id: profissional.id,
-            profissional_nome: profissional.nome,
+            profissional_id: null,
+            profissional_nome: null,
             data_agendada: data.iso,
             horario_agendado: horario
         })
