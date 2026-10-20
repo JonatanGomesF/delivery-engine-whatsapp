@@ -623,12 +623,13 @@ function getCardapio(filtro = {}) {
 function criarPedido({
     cliente, telefone, itens = [], tipoEntrega = 'delivery',
     enderecoEntrega = '', bairro = '', formaPagamento = 'PIX',
-    trocoPara = null, taxaEntrega = 0, observacoes = '', origem = 'whatsapp'
+    trocoPara = null, taxaEntrega = 0, observacoes = '', origem = 'whatsapp',
+    data = null, horario = null
 }) {
     const dados   = cacheLocal;
     const agora   = new Date();
-    const dataStr = formatarDataLocal(agora);
-    const horaStr = agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const dataStr = data || formatarDataLocal(agora);
+    const horaStr = horario || agora.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
     if (isFechadoHoje(dados)) {
         return { success: false, error: `O restaurante está fechado no momento (${dados.config.motivoFechado || 'Atendimento pausado'}).`, codigo: 'RESTAURANTE_FECHADO' };

@@ -1185,6 +1185,8 @@ async function salvarAgendamento({ telefone, nome, servico, profissional = null,
     const resultado = db.criarPedido({
         cliente: nome,
         telefone: telefone,
+        data: data.iso,
+        horario: horario,
         itens: [{
             id: servico.id,
             nome: `${servico.icone || '✂️'} ${servico.nome}`,
@@ -1204,6 +1206,7 @@ async function salvarAgendamento({ telefone, nome, servico, profissional = null,
             profissional_id: null,
             profissional_nome: null,
             data_agendada: data.iso,
+            data_label: data.label,
             horario_agendado: horario
         })
     });
