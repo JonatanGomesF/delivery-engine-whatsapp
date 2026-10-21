@@ -981,7 +981,20 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
                 return await responder(`⚠️ Dia inválido. Escolha:\n\n${listaDias}`);
             }
 
-            const horarios = getHorariosDisponiveis(dataEscolhida);
+            // Busca apenas horários livres (não ocupados por outro cliente)
+            const tenant = obterTenantAtivo(config);
+            const clienteId = String(process.env.CLIENTE_ID || config?.clienteId || tenant?.id || '').toLowerCase();
+            const horarios = await getHorariosDisponiveis(dataEscolhida, clienteId);
+
+            if (!horarios || horarios.length === 0) {
+                let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
+                return await responder(
+                    `⚠️ *Todos os horários para ${dataEscolhida.label} já foram preenchidos!*\n\n` +
+                    `Por favor, escolha outro dia:\n\n${listaDias}\n\n` +
+                    `_Digite o número do dia desejado:_`
+                );
+            }
+
             db.setEstadoConversa(from, {
                 ...estado,
                 status: 'waiting_time',
@@ -999,7 +1012,9 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
 
         // ---- ETAPA 4: ESCOLHA DO HORÁRIO ----
         case 'waiting_time': {
-            const horarios = estado.horariosDisponiveis || getHorariosDisponiveis(estado.data);
+            const tenant = obterTenantAtivo(config);
+            const clienteId = String(process.env.CLIENTE_ID || config?.clienteId || tenant?.id || '').toLowerCase();
+            const horarios = estado.horariosDisponiveis || await getHorariosDisponiveis(estado.data, clienteId);
             let horarioEscolhido = null;
 
             if (numOpcao !== null && numOpcao >= 1 && numOpcao <= horarios.length) {
@@ -1014,7 +1029,7 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
 
             if (!horarioEscolhido) {
                 let listaHorarios = horarios.map((h, i) => `${i + 1}. 🕐 ${h}`).join('\n');
-                return await responder(`⚠️ Horário inválido. Escolha:\n\n${listaHorarios}`);
+                return await responder(`⚠️ Horário inválido ou já reservado por outro cliente. Escolha uma das opções disponíveis:\n\n${listaHorarios}`);
             }
 
             db.setEstadoConversa(from, {
@@ -1046,6 +1061,42 @@ async function processarFluxoAppointment({ responder, from, nomeCliente, estado,
 
             if (numOpcao === 1 || mensagemLower.includes('confirm') || mensagemLower.includes('sim') || mensagemLower.includes('ok')) {
                 const { servico, data, horario } = estado;
+                const tenant = obterTenantAtivo(config);
+                const clienteId = String(process.env.CLIENTE_ID || config?.clienteId || tenant?.id || '').toLowerCase();
+
+                // 🛑 TRAVA ANTI-DUPLO AGENDAMENTO (Garante que ninguém reservou no mesmo segundo)
+                const ocupado = await verificarHorarioOcupado(data.iso, horario, clienteId);
+                if (ocupado) {
+                    const horariosAtualizados = await getHorariosDisponiveis(data, clienteId);
+                    if (horariosAtualizados.length > 0) {
+                        db.setEstadoConversa(from, {
+                            ...estado,
+                            status: 'waiting_time',
+                            horariosDisponiveis: horariosAtualizados
+                        });
+                        let lista = horariosAtualizados.map((h, i) => `${i + 1}. 🕐 ${h}`).join('\n');
+                        return await responder(
+                            `⚠️ *Horário Indisponível!* ⚠️\n\n` +
+                            `O horário das *${horario}* acabou de ser reservado por outro cliente para *${data.label}*.\n\n` +
+                            `👉 *Por favor, escolha outro horário disponível:*\n\n${lista}\n\n` +
+                            `_Digite o número do horário desejado:_`
+                        );
+                    } else {
+                        const dias = getProximosDias();
+                        db.setEstadoConversa(from, {
+                            ...estado,
+                            status: 'waiting_date',
+                            diasDisponiveis: dias
+                        });
+                        let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
+                        return await responder(
+                            `⚠️ *Todos os horários para ${data.label} foram preenchidos!*\n\n` +
+                            `Por favor, escolha outro dia:\n\n${listaDias}\n\n` +
+                            `_Digite o número do dia desejado:_`
+                        );
+                    }
+                }
+
                 db.limparEstadoConversa(from);
 
                 const resultado = await salvarAgendamento({
@@ -1141,8 +1192,58 @@ function getProximosDias() {
     return dias;
 }
 
-// Horários disponíveis (filtra horários que já passaram se for HOJE)
-function getHorariosDisponiveis(dataEscolhida = null) {
+// ── Anti-Duplo Agendamento: Busca horários já reservados no Supabase ──
+async function buscarHorariosOcupados(dataIso, cId = null) {
+    const tenantId = cId || process.env.CLIENTE_ID;
+    if (!tenantId || !dataIso) return [];
+
+    try {
+        const { data, error } = await supabase
+            .from('pedidos')
+            .select('data, horario, observacoes, status')
+            .eq('cliente_id', tenantId)
+            .neq('status', 'cancelado');
+
+        if (error || !data) return [];
+
+        const ocupados = new Set();
+        for (const p of data) {
+            let dataPed = p.data;
+            let horaPed = p.horario;
+
+            if (p.observacoes) {
+                try {
+                    const obs = typeof p.observacoes === 'string' ? JSON.parse(p.observacoes) : p.observacoes;
+                    if (obs?.data_agendada) dataPed = obs.data_agendada;
+                    if (obs?.horario_agendado) horaPed = obs.horario_agendado;
+                } catch (_) {}
+            }
+
+            if (dataPed === dataIso && horaPed) {
+                const [h, m] = String(horaPed).split(':');
+                if (h && m) {
+                    ocupados.add(`${h.padStart(2, '0')}:${m.slice(0, 2)}`);
+                }
+            }
+        }
+        return Array.from(ocupados);
+    } catch (err) {
+        console.error('Erro ao buscar horários ocupados:', err);
+        return [];
+    }
+}
+
+// Verifica se um horário específico já está reservado no banco
+async function verificarHorarioOcupado(dataIso, horario, cId = null) {
+    if (!dataIso || !horario) return false;
+    const ocupados = await buscarHorariosOcupados(dataIso, cId);
+    const [h, m] = String(horario).split(':');
+    const horarioPadrao = `${h.padStart(2, '0')}:${(m || '00').slice(0, 2)}`;
+    return ocupados.includes(horarioPadrao);
+}
+
+// Horários disponíveis (filtra horários que já passaram se for HOJE E exclui horários já agendados)
+async function getHorariosDisponiveis(dataEscolhida = null, cId = null) {
     const todosHorarios = [
         '09:00', '09:30', '10:00', '10:30', '11:00', '11:30',
         '13:30', '14:00', '14:30', '15:00', '15:30', '16:00',
@@ -1151,28 +1252,33 @@ function getHorariosDisponiveis(dataEscolhida = null) {
 
     if (!dataEscolhida) return todosHorarios;
 
+    const dataIso = typeof dataEscolhida === 'string' ? dataEscolhida : dataEscolhida.iso;
+
+    // 1. Busca horários já reservados por outros clientes
+    const ocupados = await buscarHorariosOcupados(dataIso, cId);
+
+    // 2. Filtra horários ocupados
+    let disponiveis = todosHorarios.filter(h => !ocupados.includes(h));
+
+    // 3. Se for HOJE, filtra os horários que já passaram do momento atual
     const hoje = new Date();
     const dd = String(hoje.getDate()).padStart(2, '0');
     const mm = String(hoje.getMonth() + 1).padStart(2, '0');
     const yyyy = hoje.getFullYear();
     const hojeIso = `${yyyy}-${mm}-${dd}`;
 
-    const isoComparar = typeof dataEscolhida === 'string' ? dataEscolhida : dataEscolhida.iso;
-
-    if (isoComparar === hojeIso) {
+    if (dataIso === hojeIso) {
         const horaAtual = hoje.getHours();
         const minAtual = hoje.getMinutes();
         const minutosAgora = horaAtual * 60 + minAtual;
 
-        const restantes = todosHorarios.filter(h => {
+        disponiveis = disponiveis.filter(h => {
             const [hH, mM] = h.split(':').map(Number);
             return (hH * 60 + mM) > minutosAgora;
         });
-
-        return restantes.length > 0 ? restantes : todosHorarios;
     }
 
-    return todosHorarios;
+    return disponiveis;
 }
 
 // Salva o agendamento na tabela `pedidos` com metadata.tipo = niche
