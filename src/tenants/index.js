@@ -25,6 +25,10 @@ function carregarTenant(clienteId = process.env.CLIENTE_ID) {
     const rawId = normalizarClienteId(clienteId);
 
     if (!rawId) {
+        return null;
+    }
+
+    if (rawId === 'default') {
         return defaultTenant;
     }
 
@@ -46,7 +50,7 @@ function carregarTenant(clienteId = process.env.CLIENTE_ID) {
         }
     } catch (err) {}
 
-    return defaultTenant;
+    return null;
 }
 
 module.exports = {

@@ -169,6 +169,52 @@ async function buscarServicosSupabase(filtro = {}) {
     }));
 }
 
+async function buscarImoveisSupabase(filtro = {}) {
+    const clienteId = process.env.CLIENTE_ID;
+    try {
+        let query = supabase
+            .from('imoveis')
+            .select('*')
+            .eq('cliente_id', clienteId);
+
+        if (filtro.tipo) {
+            query = query.eq('tipo', filtro.tipo);
+        }
+        if (filtro.apenasAtivos !== false) {
+            query = query.eq('ativo', true);
+        }
+
+        const { data, error } = await query;
+        if (!error && data && data.length > 0) {
+            return data.map(r => ({
+                id:        r.id,
+                titulo:    r.titulo || r.nome,
+                tipo:      r.tipo || 'Casa',
+                descricao: r.descricao || '',
+                preco:     Number(r.preco) || 0,
+                fotos:     Array.isArray(r.fotos) ? r.fotos : (typeof r.fotos === 'string' && r.fotos ? [r.fotos] : []),
+                icone:     r.tipo?.toLowerCase().includes('apartamento') ? '🏢' : (r.tipo?.toLowerCase().includes('terreno') ? '🏞️' : (r.tipo?.toLowerCase().includes('comercial') ? '🏬' : '🏡')),
+                ativo:     r.ativo !== false
+            }));
+        }
+    } catch (err) {
+        // Fallback silencioso para cardapio se a tabela ainda não existir
+    }
+
+    // Fallback gracioso para a tabela cardapio
+    const itensCardapio = await buscarMenuSupabase(filtro);
+    return (itensCardapio || []).map(r => ({
+        id:        r.id,
+        titulo:    r.nome,
+        tipo:      r.categoria || 'Imóvel',
+        descricao: r.descricao || '',
+        preco:     Number(r.preco) || 0,
+        fotos:     [],
+        icone:     '🏡',
+        ativo:     r.ativo !== false
+    }));
+}
+
 async function buscarOpcoesExtrasSupabase(tipo) {
     const clienteId = process.env.CLIENTE_ID;
     const { data, error } = await supabase
@@ -347,8 +393,37 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
             }
         };
 
-        if (typeof tenant.tratarOpcaoMenuPrincipal === 'function') {
+        if (tenant && typeof tenant.tratarOpcaoMenuPrincipal === 'function') {
             return await tenant.tratarOpcaoMenuPrincipal(contextTenant);
+        }
+
+        if (flow === 'corretores' || niche === 'corretores') {
+            if (mensagemLower.match(/(imovel|imóvel|imoveis|imóveis|catalogo|catálogo|ver imoveis|casas|apartamento|terreno|comprar|alugar)/i)) {
+                return await iniciarFluxoVerImoveis(responder, from, config, terms);
+            }
+            if (mensagemLower.match(/(visita|visitar|agendar|agendamento|reuniao|reunião|marcar)/i)) {
+                return await iniciarFluxoAgendarVisita(responder, from, config, terms);
+            }
+            if (mensagemLower.match(/(simula|simular|financiamento|banco|parcela|documentos|documentacao|documentação)/i)) {
+                return await enviarInfoFinanciamento(responder, config, terms);
+            }
+            if (mensagemLower.match(/(corretor|falar|humano|atendente|contato|telefone|whatsapp|plantao|plantão)/i)) {
+                return await conectarComCorretor(responder, from, nomeCliente, config, notificarDono);
+            }
+
+            if (numOpcao === 1) {
+                return await iniciarFluxoVerImoveis(responder, from, config, terms);
+            } else if (numOpcao === 2) {
+                return await iniciarFluxoAgendarVisita(responder, from, config, terms);
+            } else if (numOpcao === 3) {
+                return await enviarInfoFinanciamento(responder, config, terms);
+            } else if (numOpcao === 4) {
+                return await conectarComCorretor(responder, from, nomeCliente, config, notificarDono);
+            } else if (numOpcao === 5) {
+                return await processarFluxoCancelamento(responder, from, nomeCliente, config, terms, emitEvent, notificarDono);
+            } else {
+                return await enviarMenuPrincipal(responder, nomeCliente, config, terms);
+            }
         }
 
         const triggerRegex = flow === 'order'
@@ -381,6 +456,8 @@ async function processarMensagem({ from, nome, texto, sendMessage, sendTyping, e
     // 3. Máquina de Estados da Conversa
     if (flow === 'order') {
         return await processarFluxoOrder({ responder, from, nomeCliente, estado, config, mensagens, terms, numOpcao, mensagemLimpa, mensagemLower, emitEvent, notificarDono });
+    } else if (flow === 'corretores' || niche === 'corretores') {
+        return await processarFluxoCorretores({ responder, from, nomeCliente, estado, config, mensagens, terms, numOpcao, mensagemLimpa, mensagemLower, emitEvent, notificarDono, niche });
     } else {
         return await processarFluxoAppointment({ responder, from, nomeCliente, estado, config, mensagens, terms, numOpcao, mensagemLimpa, mensagemLower, emitEvent, notificarDono, niche });
     }
@@ -1324,6 +1401,475 @@ async function salvarAgendamento({ telefone, nome, servico, profissional = null,
 }
 
 // =====================================================================
+// FLUXO CORRETORES — Imobiliária & Corretores
+// (Imóveis → Detalhes → Agendar Visita / Reunião → Confirmação)
+// =====================================================================
+
+async function salvarAgendamentoVisita({ telefone, nome, imovel, data, horario, niche = 'corretores' }) {
+    const codigo = `VIS-${Date.now().toString(36).toUpperCase()}`;
+
+    const resultado = db.criarPedido({
+        cliente: nome,
+        telefone: telefone,
+        data: data.iso,
+        horario: horario,
+        itens: [{
+            id: imovel.id,
+            nome: `🏡 Visita: ${imovel.titulo}`,
+            preco: 0,
+            qtd: 1,
+            observacao: `Visita Imóvel: ${imovel.titulo} (${data.label} às ${horario})`,
+            totalItem: 0
+        }],
+        tipoEntrega: 'visita',
+        enderecoEntrega: '',
+        formaPagamento: 'a_confirmar',
+        taxaEntrega: 0,
+        origem: 'whatsapp',
+        observacoes: JSON.stringify({
+            tipo: 'corretores',
+            niche: 'corretores',
+            imovel_id: imovel.id,
+            imovel_titulo: imovel.titulo,
+            imovel_tipo: imovel.tipo,
+            data_agendada: data.iso,
+            data_label: data.label,
+            horario_agendado: horario
+        })
+    });
+
+    if (resultado.success) {
+        resultado.pedido.codigo = `#${codigo}`;
+        return { codigo: `#${codigo}`, id: resultado.pedido.id, pedido: resultado.pedido };
+    }
+    return { codigo: `#${codigo}`, id: null, pedido: null };
+}
+
+async function iniciarFluxoVerImoveis(responder, from, config, terms) {
+    const imoveis = await buscarImoveisSupabase({ apenasAtivos: true });
+    if (!imoveis || imoveis.length === 0) {
+        db.limparEstadoConversa(from);
+        return await responder(
+            `🏡 *IMÓVEIS — ${config.nomeRestaurante || 'IMOBILIÁRIA'}*\n\n` +
+            `No momento não há imóveis cadastrados para consulta online.\n\n` +
+            `👉 Envie *4* para falar diretamente com nosso corretor de plantão ou envie *MENU* para voltar.`
+        );
+    }
+
+    db.setEstadoConversa(from, {
+        status: 'corretores_escolhendo_imovel_detalhe',
+        imoveis
+    });
+
+    let lista = imoveis.map((im, i) => {
+        const precoTxt = im.preco > 0 ? formatarMoeda(im.preco) : 'Sob Consulta';
+        return `${i + 1}. ${im.icone || '🏡'} *${im.titulo}* (${im.tipo}) — *${precoTxt}*`;
+    }).join('\n\n');
+
+    const nomeEstab = config.nomeRestaurante || 'Nossa Imobiliária';
+    return await responder(
+        `🏡 *IMÓVEIS DISPONÍVEIS — ${nomeEstab.toUpperCase()}*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `${lista}\n\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `👉 *Digite o número do imóvel para ver fotos e detalhes completos:*\n` +
+        `_Ou envie *MENU* para voltar ao início._`
+    );
+}
+
+async function iniciarFluxoAgendarVisita(responder, from, config, terms) {
+    const imoveis = await buscarImoveisSupabase({ apenasAtivos: true });
+
+    db.setEstadoConversa(from, {
+        status: 'corretores_escolhendo_imovel_visita',
+        imoveis: imoveis || []
+    });
+
+    let lista = (imoveis || []).map((im, i) => {
+        const precoTxt = im.preco > 0 ? ` (${formatarMoeda(im.preco)})` : '';
+        return `${i + 1}. ${im.icone || '🏡'} *${im.titulo}*${precoTxt}`;
+    }).join('\n');
+
+    const opcaoConsultoria = (imoveis && imoveis.length > 0)
+        ? `\n${imoveis.length + 1}. 💼 *Consultoria Geral / Atendimento no Escritório*`
+        : `1. 💼 *Consultoria Geral / Atendimento no Escritório*`;
+
+    return await responder(
+        `📅 *AGENDAMENTO DE VISITA / REUNIÃO*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `Para qual imóvel você deseja agendar a visita?\n\n` +
+        `${lista}${opcaoConsultoria}\n\n` +
+        `👉 *Digite o número da opção desejada:*\n` +
+        `_Ou envie *MENU* para voltar._`
+    );
+}
+
+async function enviarInfoFinanciamento(responder, config, terms) {
+    const nomeEstab = config.nomeRestaurante || 'Nossa Imobiliária';
+    const telDono = config.numeroDono ? config.numeroDono.replace('@c.us', '') : '';
+    const linkZap = telDono ? `https://wa.me/${telDono}` : '';
+
+    return await responder(
+        `💬 *SIMULAÇÃO & FINANCIAMENTO IMOBILIÁRIO — ${nomeEstab.toUpperCase()}*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `Trabalhamos com os principais bancos para encontrar a menor taxa de juros e as melhores condições para você:\n\n` +
+        `🏦 *Bancos Parceiros:* Caixa Econômica, Bradesco, Itaú, Santander e Banco do Brasil.\n\n` +
+        `📋 *Documentação Básica para Análise:*\n` +
+        `• RG e CPF (ou CNH)\n` +
+        `• Comprovante de Residência recente\n` +
+        `• Comprovante de Renda (Holerites recentes, Declaração de IRPF ou Extratos Bancários)\n` +
+        `• Carteira de Trabalho / Extrato de FGTS (caso utilize FGTS na entrada)\n\n` +
+        `💡 *Deseja fazer uma simulação personalizada sem compromisso?*\n\n` +
+        `1️⃣ 🏡 *Ver Imóveis Disponíveis*\n` +
+        `2️⃣ 📅 *Agendar Reunião de Consultoria*\n` +
+        `4️⃣ 👤 *Falar Diretamente com o Corretor no WhatsApp*\n\n` +
+        (linkZap ? `👉 Link direto: ${linkZap}\n\n` : '') +
+        `_Envie o número desejado ou envie *MENU* para voltar._`
+    );
+}
+
+async function conectarComCorretor(responder, from, nomeCliente, config, notificarDono) {
+    const nomeEstab = config.nomeRestaurante || 'Nossa Imobiliária';
+    const telDono = config.numeroDono ? config.numeroDono.replace('@c.us', '') : '';
+    const linkZap = telDono ? `https://wa.me/${telDono}` : '';
+
+    if (notificarDono) {
+        await notificarDono(
+            `🚨 *SOLICITAÇÃO DE ATENDIMENTO — CORRETOR*\n━━━━━━━━━━━━━━━━━━━━\n` +
+            `👤 *Cliente:* ${nomeCliente}\n` +
+            `📱 *WhatsApp:* ${from.replace('@c.us', '')}\n` +
+            `⏰ *Data/Hora:* ${new Date().toLocaleDateString('pt-BR')} às ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}\n` +
+            `👉 O cliente solicitou contato direto no WhatsApp!`
+        );
+    }
+
+    return await responder(
+        `👤 *FALAR COM NOSSO CORRETOR — ${nomeEstab.toUpperCase()}*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `Olá, *${nomeCliente}*! Nosso corretor especialista já foi notificado e responderá aqui em breve.\n\n` +
+        (telDono ? `📱 Se preferir contato imediato, você também pode chamar direto:\n👉 *WhatsApp:* ${telDono}\n👉 *Link:* ${linkZap}\n\n` : '') +
+        `🏠 *Endereço do Escritório:* ${config.endereco || 'Consulte nosso corretor'}\n` +
+        `⏰ *Horário de Atendimento:* ${config.horarioAlmoco || '08:00'} às ${config.horarioJantar || '18:00'}\n\n` +
+        `_Envie *MENU* a qualquer momento para voltar ao início._`
+    );
+}
+
+async function processarFluxoCorretores({ responder, from, nomeCliente, estado, config, mensagens, terms, numOpcao, mensagemLimpa, mensagemLower, emitEvent, notificarDono, niche }) {
+    const tenant = obterTenantAtivo(config);
+    const clienteId = String(process.env.CLIENTE_ID || config?.clienteId || tenant?.id || '').toLowerCase();
+
+    switch (estado.status) {
+
+        // ---- ETAPA 1: VISUALIZANDO DETALHES DE UM IMÓVEL ----
+        case 'corretores_escolhendo_imovel_detalhe': {
+            const imoveis = estado.imoveis || await buscarImoveisSupabase({ apenasAtivos: true });
+            if (!imoveis || imoveis.length === 0) {
+                db.limparEstadoConversa(from);
+                return await responder("Nenhum imóvel disponível no momento.");
+            }
+
+            let imovelEscolhido = null;
+            if (numOpcao !== null && numOpcao >= 1 && numOpcao <= imoveis.length) {
+                imovelEscolhido = imoveis[numOpcao - 1];
+            } else {
+                imovelEscolhido = imoveis.find(im => mensagemLower.includes(im.titulo.toLowerCase()));
+            }
+
+            if (!imovelEscolhido) {
+                let lista = imoveis.map((im, i) => `${i + 1}. ${im.icone || '🏡'} *${im.titulo}*`).join('\n');
+                return await responder(
+                    `⚠️ Opção inválida. Escolha um dos imóveis:\n\n${lista}\n\n_Ou envie *MENU* para voltar._`
+                );
+            }
+
+            db.setEstadoConversa(from, {
+                status: 'corretores_detalhe_acoes',
+                imovelEscolhido,
+                imoveis
+            });
+
+            let texto = `${imovelEscolhido.icone || '🏡'} *${imovelEscolhido.titulo.toUpperCase()}*\n`;
+            texto += `━━━━━━━━━━━━━━━━━━━━\n`;
+            texto += `🏷️ *Tipo:* ${imovelEscolhido.tipo}\n`;
+            texto += `💰 *Valor:* ${imovelEscolhido.preco > 0 ? formatarMoeda(imovelEscolhido.preco) : 'Sob Consulta'}\n`;
+            if (imovelEscolhido.descricao) {
+                texto += `📝 *Descrição:*\n_${imovelEscolhido.descricao}_\n`;
+            }
+            if (imovelEscolhido.fotos && imovelEscolhido.fotos.length > 0) {
+                texto += `\n📸 *Fotos / Links:*\n`;
+                texto += imovelEscolhido.fotos.map((f, i) => `• Foto ${i + 1}: ${f}`).join('\n') + `\n`;
+            }
+            texto += `━━━━━━━━━━━━━━━━━━━━\n`;
+            texto += `👉 *O que você deseja fazer agora?*\n\n`;
+            texto += `1️⃣ 📅 *Agendar Visita a este Imóvel*\n`;
+            texto += `2️⃣ 🏡 *Ver outros imóveis*\n`;
+            texto += `3️⃣ 👤 *Falar com Corretor sobre este imóvel*\n\n`;
+            texto += `_Digite 1, 2 ou 3 (ou envie *MENU* para voltar):_`;
+
+            return await responder(texto);
+        }
+
+        // ---- ETAPA 1.1: AÇÕES A PARTIR DO DETALHE DO IMÓVEL ----
+        case 'corretores_detalhe_acoes': {
+            const imovel = estado.imovelEscolhido;
+            if (!imovel) {
+                db.limparEstadoConversa(from);
+                return await enviarMenuPrincipal(responder, nomeCliente, config, terms);
+            }
+
+            if (numOpcao === 1 || mensagemLower.match(/(visita|visitar|agendar|marcar|1)/i)) {
+                const dias = getProximosDias();
+                db.setEstadoConversa(from, {
+                    status: 'corretores_escolhendo_data',
+                    imovelEscolhido: imovel,
+                    diasDisponiveis: dias
+                });
+
+                let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
+                return await responder(
+                    `🏡 *Imóvel:* *${imovel.titulo}*\n\n` +
+                    `📅 *Escolha a data desejada para a visita:*\n\n${listaDias}\n\n` +
+                    `_Digite o número do dia desejado ou envie *MENU* para voltar:_`
+                );
+            } else if (numOpcao === 2 || mensagemLower.match(/(outros|imoveis|imóveis|ver|2)/i)) {
+                return await iniciarFluxoVerImoveis(responder, from, config, terms);
+            } else if (numOpcao === 3 || mensagemLower.match(/(corretor|falar|duvida|dúvida|3)/i)) {
+                if (notificarDono) {
+                    await notificarDono(
+                        `🚨 *CLIENTE INTERESSADO EM IMÓVEL!*\n━━━━━━━━━━━━━━━━━━━━\n` +
+                        `👤 *Cliente:* ${nomeCliente}\n` +
+                        `📱 *WhatsApp:* ${from.replace('@c.us', '')}\n` +
+                        `🏡 *Imóvel de Interesse:* ${imovel.titulo} (${formatarMoeda(imovel.preco)})\n` +
+                        `👉 O cliente solicitou atendimento para este imóvel específico!`
+                    );
+                }
+                return await conectarComCorretor(responder, from, nomeCliente, config, null);
+            } else {
+                return await responder(
+                    `👉 Por favor, digite:\n*1.* 📅 Agendar Visita a este Imóvel\n*2.* 🏡 Ver outros imóveis\n*3.* 👤 Falar com Corretor\n\n_Ou envie *MENU* para voltar._`
+                );
+            }
+        }
+
+        // ---- ETAPA 2: ESCOLHENDO IMÓVEL PARA AGENDAR VISITA ----
+        case 'corretores_escolhendo_imovel_visita': {
+            const imoveis = estado.imoveis || [];
+            let imovelEscolhido = null;
+
+            if (numOpcao !== null && numOpcao >= 1 && numOpcao <= imoveis.length) {
+                imovelEscolhido = imoveis[numOpcao - 1];
+            } else if (numOpcao === imoveis.length + 1) {
+                imovelEscolhido = {
+                    id: 'consultoria_geral',
+                    titulo: 'Consultoria Geral / Atendimento no Escritório',
+                    tipo: 'Consultoria',
+                    preco: 0,
+                    icone: '💼'
+                };
+            }
+
+            if (!imovelEscolhido) {
+                let lista = imoveis.map((im, i) => `${i + 1}. ${im.icone || '🏡'} *${im.titulo}*`).join('\n');
+                const opcaoConsultoria = `\n${imoveis.length + 1}. 💼 *Consultoria Geral / Atendimento no Escritório*`;
+                return await responder(
+                    `⚠️ Opção inválida. Escolha um dos imóveis ou consultoria:\n\n${lista}${opcaoConsultoria}\n\n_Ou envie *MENU* para voltar._`
+                );
+            }
+
+            const dias = getProximosDias();
+            db.setEstadoConversa(from, {
+                status: 'corretores_escolhendo_data',
+                imovelEscolhido,
+                diasDisponiveis: dias
+            });
+
+            let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
+            return await responder(
+                `🏡 *Opção Selecionada:* *${imovelEscolhido.titulo}*\n\n` +
+                `📅 *Escolha a data desejada para a visita:*\n\n${listaDias}\n\n` +
+                `_Digite o número do dia desejado ou envie *MENU* para voltar:_`
+            );
+        }
+
+        // ---- ETAPA 3: ESCOLHENDO DATA DA VISITA ----
+        case 'corretores_escolhendo_data': {
+            const dias = estado.diasDisponiveis || getProximosDias();
+            let dataEscolhida = null;
+
+            if (numOpcao !== null && numOpcao >= 1 && numOpcao <= dias.length) {
+                dataEscolhida = dias[numOpcao - 1];
+            }
+
+            if (!dataEscolhida) {
+                let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
+                return await responder(`⚠️ Dia inválido. Escolha uma das opções:\n\n${listaDias}`);
+            }
+
+            const horarios = await getHorariosDisponiveis(dataEscolhida, clienteId);
+            if (!horarios || horarios.length === 0) {
+                let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
+                return await responder(
+                    `⚠️ *Todos os horários para ${dataEscolhida.label} já foram preenchidos!*\n\n` +
+                    `Por favor, escolha outro dia:\n\n${listaDias}\n\n` +
+                    `_Digite o número do dia desejado:_`
+                );
+            }
+
+            db.setEstadoConversa(from, {
+                ...estado,
+                status: 'corretores_escolhendo_horario',
+                dataEscolhida,
+                horariosDisponiveis: horarios
+            });
+
+            let listaHorarios = horarios.map((h, i) => `${i + 1}. 🕐 ${h}`).join('\n');
+            return await responder(
+                `🏡 *${estado.imovelEscolhido?.titulo || 'Visita'}*\n` +
+                `📅 Data: *${dataEscolhida.label}*\n\n` +
+                `⏰ *Escolha o horário para a visita:*\n\n${listaHorarios}\n\n` +
+                `_Digite o número do horário desejado:_`
+            );
+        }
+
+        // ---- ETAPA 4: ESCOLHENDO HORÁRIO DA VISITA ----
+        case 'corretores_escolhendo_horario': {
+            const horarios = estado.horariosDisponiveis || await getHorariosDisponiveis(estado.dataEscolhida, clienteId);
+            let horarioEscolhido = null;
+
+            if (numOpcao !== null && numOpcao >= 1 && numOpcao <= horarios.length) {
+                horarioEscolhido = horarios[numOpcao - 1];
+            } else {
+                const match = mensagemLimpa.match(/^(\d{1,2})[:h]?(\d{0,2})/);
+                if (match) {
+                    const hStr = `${match[1].padStart(2, '0')}:${(match[2] || '00').padStart(2, '0')}`;
+                    horarioEscolhido = horarios.find(h => h === hStr);
+                }
+            }
+
+            if (!horarioEscolhido) {
+                let listaHorarios = horarios.map((h, i) => `${i + 1}. 🕐 ${h}`).join('\n');
+                return await responder(`⚠️ Horário inválido ou já reservado. Escolha uma das opções:\n\n${listaHorarios}`);
+            }
+
+            db.setEstadoConversa(from, {
+                ...estado,
+                status: 'corretores_confirmando_visita',
+                horarioEscolhido
+            });
+
+            const { imovelEscolhido, dataEscolhida } = estado;
+            return await responder(
+                `📋 *RESUMO DA VISITA:*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+                `🏡 *Imóvel / Atendimento:* *${imovelEscolhido.titulo}*\n` +
+                `🏷️ *Tipo:* ${imovelEscolhido.tipo}\n` +
+                `📅 *Data:* *${dataEscolhida.label}*\n` +
+                `⏰ *Horário:* *${horarioEscolhido}*\n\n` +
+                `━━━━━━━━━━━━━━━━━━━━\n` +
+                `*1.* ✅ Confirmar Agendamento de Visita\n` +
+                `*2.* ❌ Cancelar\n\n` +
+                `_Digite 1 para confirmar ou 2 para cancelar._`
+            );
+        }
+
+        // ---- ETAPA 5: CONFIRMAÇÃO DA VISITA (ANTI-DUPLO AGENDAMENTO) ----
+        case 'corretores_confirmando_visita': {
+            if (numOpcao === 2 || mensagemLower.includes('cancel') || mensagemLower.includes('não') || mensagemLower === 'nao') {
+                db.limparEstadoConversa(from);
+                return await responder(`❌ Agendamento de visita cancelado. Envie *MENU* para retornar ao início quando quiser.`);
+            }
+
+            if (numOpcao === 1 || mensagemLower.includes('confirm') || mensagemLower.includes('sim') || mensagemLower.includes('ok')) {
+                const { imovelEscolhido, dataEscolhida, horarioEscolhido } = estado;
+
+                // 🛑 TRAVA ANTI-DUPLO AGENDAMENTO
+                const ocupado = await verificarHorarioOcupado(dataEscolhida.iso, horarioEscolhido, clienteId);
+                if (ocupado) {
+                    const horariosAtualizados = await getHorariosDisponiveis(dataEscolhida, clienteId);
+                    if (horariosAtualizados.length > 0) {
+                        db.setEstadoConversa(from, {
+                            ...estado,
+                            status: 'corretores_escolhendo_horario',
+                            horariosDisponiveis: horariosAtualizados
+                        });
+                        let lista = horariosAtualizados.map((h, i) => `${i + 1}. 🕐 ${h}`).join('\n');
+                        return await responder(
+                            `⚠️ *Horário Indisponível!* ⚠️\n\n` +
+                            `O horário das *${horarioEscolhido}* acabou de ser reservado para *${dataEscolhida.label}*.\n\n` +
+                            `👉 *Por favor, escolha outro horário disponível:*\n\n${lista}\n\n` +
+                            `_Digite o número do horário desejado:_`
+                        );
+                    } else {
+                        const dias = getProximosDias();
+                        db.setEstadoConversa(from, {
+                            ...estado,
+                            status: 'corretores_escolhendo_data',
+                            diasDisponiveis: dias
+                        });
+                        let listaDias = dias.map((d, i) => `${i + 1}. 📅 ${d.label}`).join('\n');
+                        return await responder(
+                            `⚠️ *Todos os horários para ${dataEscolhida.label} foram preenchidos!*\n\n` +
+                            `Por favor, escolha outro dia para a visita:\n\n${listaDias}\n\n` +
+                            `_Digite o número do dia desejado:_`
+                        );
+                    }
+                }
+
+                db.limparEstadoConversa(from);
+
+                const resultado = await salvarAgendamentoVisita({
+                    telefone: from,
+                    nome: nomeCliente,
+                    imovel: imovelEscolhido,
+                    data: dataEscolhida,
+                    horario: horarioEscolhido,
+                    niche: 'corretores'
+                });
+
+                const codigo = resultado?.codigo || `#VIS-${Date.now().toString(36).toUpperCase()}`;
+
+                if (emitEvent && resultado?.pedido) {
+                    emitEvent('novo_agendamento', resultado.pedido);
+                }
+
+                if (notificarDono) {
+                    await notificarDono(
+                        `🚨 *NOVA VISITA AGENDADA!*\n━━━━━━━━━━━━━━━━━━━━\n` +
+                        `👤 *Cliente:* ${nomeCliente}\n` +
+                        `📱 *WhatsApp:* ${from.replace('@c.us', '')}\n` +
+                        `🏡 *Imóvel:* ${imovelEscolhido.titulo} (${imovelEscolhido.tipo})\n` +
+                        `📅 *Data:* ${dataEscolhida.label} às ${horarioEscolhido}\n` +
+                        `🔖 *Código:* ${codigo}`
+                    );
+                }
+
+                const nomeEstab = config.nomeRestaurante || 'Imobiliária';
+                return await responder(
+                    `🎉 *VISITA AGENDADA COM SUCESSO!* 🎉\n\n` +
+                    `🏡 *${nomeEstab.toUpperCase()}*\n` +
+                    `━━━━━━━━━━━━━━━━━━━━\n` +
+                    `🎫 *Código da Visita:* *${codigo}*\n` +
+                    `👤 *Cliente:* ${nomeCliente}\n` +
+                    `🏡 *Imóvel:* ${imovelEscolhido.titulo} (${imovelEscolhido.tipo})\n` +
+                    `📅 *Data e Horário:* *${dataEscolhida.label}* às *${horarioEscolhido}*\n` +
+                    `👨‍💼 *Status:* 🟡 _Confirmada na agenda do corretor!_\n` +
+                    `━━━━━━━━━━━━━━━━━━━━\n` +
+                    `📍 Nosso corretor entrará em contato para alinhar detalhes de localização ou aguardará você no horário agendado.\n\n` +
+                    `_Obrigado pela confiança! Conte conosco para realizar o melhor negócio._ 🏡🔑`
+                );
+            }
+
+            return await responder(
+                `Por favor, confirme:\n\n*1.* ✅ Confirmar Agendamento\n*2.* ❌ Cancelar`
+            );
+        }
+
+        default:
+            db.limparEstadoConversa(from);
+            return await enviarMenuPrincipal(responder, nomeCliente, config, terms);
+    }
+}
+
+// =====================================================================
 // MENUS E HELPERS GERAIS
 // =====================================================================
 
@@ -1342,12 +1888,14 @@ function obterTenantAtivo(config = {}) {
         }
     }
 
-    // Fallback genérico seguro (default.js)
-    return carregarTenant('default');
+    // Se não houver arquivo específico para este tenant, retorna null (usa o motor dinâmico por nicho)
+    return null;
 }
 
 async function enviarMenuPrincipal(responder, nomeCliente, config, terms) {
     const tenant = obterTenantAtivo(config);
+    const niche = await getNiche();
+    const isCorretor = niche === 'corretores' || niche === 'imoveis' || niche === 'imobiliaria' || niche === 'corretor';
 
     // 1️⃣ PRIMEIRA VERIFICAÇÃO: Executa tenant.getMenuPrincipal(...) se a função existir no tenant ativo
     if (tenant && typeof tenant.getMenuPrincipal === 'function') {
@@ -1361,22 +1909,36 @@ async function enviarMenuPrincipal(responder, nomeCliente, config, terms) {
         return await responder(textoMenuTenant);
     }
 
+    const avisoFechado = config.fechadoHoje
+        ? (isCorretor
+            ? `🛑 *AVISO:* Escritório fechado hoje (${config.motivoFechado || 'Plantão de atendimento'}).\n\n`
+            : `🛑 *AVISO:* O estabelecimento está fechado hoje (${config.motivoFechado || 'Recesso'}).\n\n`)
+        : '';
+
     // 2️⃣ Se houver mensagem customizada salva no Supabase (Painel Master)
     if (config?.mensagens?.menuPrincipal) {
         const textoBanco = formatarTexto(config.mensagens.menuPrincipal, {
             nome: nomeCliente || 'Cliente',
-            restaurante: (config.nomeRestaurante || 'Estabelecimento').toUpperCase()
+            restaurante: (config.nomeRestaurante || 'Estabelecimento').toUpperCase(),
+            avisoFechado: avisoFechado
         });
         return await responder(textoBanco);
     }
 
     // 3️⃣ Fallback genérico adaptado (sem textos específicos hardcoded)
-    const templateDefault = (tenant && tenant.menuPrincipal) || 
-        `👋 *BEM-VINDO AO {restaurante}* 👋\n\nOlá, *{nome}*! Como podemos te ajudar hoje?\n\n1️⃣ 🛒 *Ver Opções / Fazer Pedido*\n2️⃣ 📋 *Ver Cardápio Completo*\n3️⃣ 📍 *Horários, Endereço & Pagamento*\n4️⃣ ❌ *Cancelar Pedido*\n\n👉 _Digite o número da opção desejada:_`;
+    let templateDefault;
+    if (isCorretor) {
+        templateDefault = (tenant && tenant.menuPrincipal) || 
+            `🏡 *BEM-VINDO À {restaurante}* 🏡\n\nOlá, *{nome}*! Como podemos ajudar você hoje?\n\n{avisoFechado}1️⃣ 🏡 *Ver Imóveis Disponíveis*\n2️⃣ 📅 *Agendar Visita / Reunião*\n3️⃣ 💬 *Simulação / Financiamento / Informações*\n4️⃣ 👤 *Falar com Corretor*\n5️⃣ ❌ *Cancelar Agendamento*\n\n👉 _Digite o número da opção desejada (Ex: 1):_`;
+    } else {
+        templateDefault = (tenant && tenant.menuPrincipal) || 
+            `👋 *BEM-VINDO AO {restaurante}* 👋\n\nOlá, *{nome}*! Como podemos te ajudar hoje?\n\n{avisoFechado}1️⃣ 🛒 *Ver Opções / Fazer Pedido*\n2️⃣ 📋 *Ver Cardápio Completo*\n3️⃣ 📍 *Horários, Endereço & Pagamento*\n4️⃣ ❌ *Cancelar Pedido*\n\n👉 _Digite o número da opção desejada:_`;
+    }
 
     const textoMenu = formatarTexto(templateDefault, {
         restaurante: (config.nomeRestaurante || 'NOSSO ESTABELECIMENTO').toUpperCase(),
-        nome: nomeCliente || 'Cliente'
+        nome: nomeCliente || 'Cliente',
+        avisoFechado: avisoFechado
     });
 
     return await responder(textoMenu);
@@ -1430,6 +1992,26 @@ async function enviarCardapioCompleto(responder, config, terms) {
     const niche = await getNiche();
     const flow = getNicheFlow(niche);
 
+    if (flow === 'corretores' || niche === 'corretores') {
+        const imoveis = await buscarImoveisSupabase({ apenasAtivos: true });
+        if (!imoveis || imoveis.length === 0) {
+            return await responder("Nenhum imóvel disponível cadastrado no momento.");
+        }
+
+        const nomeEstab = config.nomeRestaurante || 'Imobiliária';
+        let texto = `🏡 *CATÁLOGO DE IMÓVEIS — ${nomeEstab.toUpperCase()}*\n\n`;
+        texto += imoveis.map(im => {
+            const desc = im.descricao ? `\n  _${im.descricao}_` : '';
+            const precoTxt = im.preco > 0 ? formatarMoeda(im.preco) : 'Sob Consulta';
+            return `• ${im.icone || '🏡'} *${im.titulo}* (${im.tipo}) — *${precoTxt}*${desc}`;
+        }).join('\n\n');
+
+        texto += `\n\n━━━━━━━━━━━━━━━━━━━━\n` +
+            `_Envie *1* para ver fotos e detalhes ou *2* para agendar uma visita!_`;
+
+        return await responder(texto);
+    }
+
     if (flow === 'appointment') {
         const servicos = await buscarServicosSupabase({ apenasAtivos: true });
         if (!servicos || servicos.length === 0) {
@@ -1478,8 +2060,8 @@ async function consultarStatusPedido(responder, from, nomeCliente, config, terms
         db.limparEstadoConversa(from);
         return await responder(
             `📋 Olá, *${nomeCliente}*!\n\n` +
-            `Você não possui nenhum pedido em andamento no momento.\n\n` +
-            `Deseja fazer um pedido delicioso agora? Envie *1* para pedir!`
+            `Você não possui nenhum pedido ou agendamento em andamento no momento.\n\n` +
+            `Envie *MENU* para ver as opções disponíveis!`
         );
     }
 
@@ -1488,16 +2070,18 @@ async function consultarStatusPedido(responder, from, nomeCliente, config, terms
     let lista = pedidos.map(p => {
         const statusTexto = mapaStatus[p.status] || p.status;
         const tipoTxt = p.tipoEntrega === 'delivery' ? '🛵 Delivery'
-            : ((p.tipoEntrega === 'agendamento' || p.tipoEntrega === 'presencial') ? '📍 Atendimento Presencial' : '🛍️ Retirada');
+            : (p.tipoEntrega === 'visita' ? '🏡 Visita Imobiliária'
+            : ((p.tipoEntrega === 'agendamento' || p.tipoEntrega === 'presencial') ? '📍 Atendimento Presencial' : '🛍️ Retirada'));
+        const labelItens = p.tipoEntrega === 'visita' ? '🏡 Imóvel:' : '🍽️ Itens:';
         return `🎫 *Pedido ${p.codigo}*\n` +
-            `🍽️ *Itens:* ${p.servico}\n` +
+            `${labelItens} ${p.servico}\n` +
             `💰 *Total:* ${formatarMoeda(p.total)} (${tipoTxt})\n` +
             `⏳ *Previsão:* ${p.tempoEstimado}\n` +
             `📍 *Status:* ${statusTexto}\n`;
     }).join('\n━━━━━━━━━━━━━━━━━━━━\n\n');
 
     return await responder(
-        `🛵 *STATUS DOS SEUS PEDIDOS:*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
+        `🛵 *STATUS DOS SEUS PEDIDOS / AGENDAMENTOS:*\n━━━━━━━━━━━━━━━━━━━━\n\n` +
         `${lista}\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `_Qualquer dúvida ou alteração, nossa equipe está à disposição!_`

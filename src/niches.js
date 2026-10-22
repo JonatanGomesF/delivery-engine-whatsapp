@@ -244,12 +244,62 @@ const NICHE_REGISTRY = {
                 cancelado: '❌ *Cancelado*'
             }
         }
+    },
+
+    // ── CORRETORES — Imóveis, Visitas & Consultoria Imobiliária ───
+    corretores: {
+        label: 'Corretores / Imóveis',
+        flow: 'corretores',
+        itemSource: 'imoveis',
+        orderType: 'corretores',
+        terms: {
+            business: 'Imobiliária',
+            order: 'Visita',
+            orders: 'Visitas',
+            item: 'Imóvel',
+            items: 'Imóveis',
+            category: 'Tipo',
+            categories: 'Tipos',
+            service: 'Visita / Consultoria',
+            makeOrder: 'Agendar Visita',
+            viewCardapio: 'Ver Imóveis',
+            orderStatus: 'Minha Visita',
+            infoHours: 'Informações & Atendimento',
+            cancelOrder: 'Cancelar Visita',
+            chooseCategory: 'Escolha o tipo de imóvel:',
+            chooseItem: 'Digite o número do imóvel desejado:',
+            howToReceive: 'TIPO DE AGENDAMENTO:',
+            delivery: 'Presencial no Imóvel',
+            pickup: 'Reunião no Escritório',
+            address: 'DATA DESEJADA:',
+            paymentMethod: 'Escolha o horário:',
+            orderReceived: 'VISITA AGENDADA COM SUCESSO!',
+            yourOrder: 'RESUMO DA VISITA:',
+            addMore: 'Ver outros imóveis',
+            finish: 'Confirmar visita',
+            kitchen: 'Imobiliária',
+            newOrder: 'NOVA VISITA AGENDADA!',
+            orderCancelled: 'VISITA CANCELADA',
+            noOrders: 'Você não possui nenhuma visita agendada em andamento.',
+            noOrdersToCancel: 'Você não possui agendamentos ativos para cancelar.',
+            activeOrders: 'SUAS VISITAS AGENDADAS:',
+            status: {
+                pendente: '🟡 *Aguardando Visita*',
+                em_preparo: '🏡 *Em Visita / Reunião*',
+                saiu_entrega: '✅ *Confirmada*',
+                concluido: '✅ *Visita Realizada*',
+                cancelado: '❌ *Cancelada*'
+            }
+        }
     }
 };
 
 // Aliases em português para compatibilidade total com os selects do Painel Master
-NICHE_REGISTRY['barbearia'] = NICHE_REGISTRY['barbershop'];
-NICHE_REGISTRY['clinica']    = NICHE_REGISTRY['clinic'];
+NICHE_REGISTRY['barbearia']   = NICHE_REGISTRY['barbershop'];
+NICHE_REGISTRY['clinica']     = NICHE_REGISTRY['clinic'];
+NICHE_REGISTRY['imoveis']     = NICHE_REGISTRY['corretores'];
+NICHE_REGISTRY['imobiliaria'] = NICHE_REGISTRY['corretores'];
+NICHE_REGISTRY['corretor']    = NICHE_REGISTRY['corretores'];
 
 // Retorna a configuração do niche (sem fallback para delivery)
 function getNicheConfig(niche) {
@@ -342,15 +392,34 @@ function montarTemplatesAgendamento() {
     };
 }
 
+// ── BASE "CORRETORES / IMÓVEIS" ──────────────────────────────────────
+const MENSAGENS_CORRETORES = {
+    menuPrincipal: `🏡 *BEM-VINDO À {restaurante}* 🏡\n\nOlá, *{nome}*! Como podemos ajudar você hoje?\n\n{avisoFechado}1️⃣ 🏡 *Ver Imóveis Disponíveis*\n2️⃣ 📅 *Agendar Visita / Reunião*\n3️⃣ 💬 *Simulação / Financiamento / Informações*\n4️⃣ 👤 *Falar com Corretor*\n5️⃣ ❌ *Cancelar Agendamento*\n\n👉 _Digite o número da opção desejada (Ex: *1*):_`,
+    fechadoAviso: `🛑 *AVISO:* O escritório está fechado hoje ({motivo}). Atendimentos de plantão disponíveis diretamente com nosso corretor.`,
+    escolhaItem: `🏡 *IMÓVEIS DISPONÍVEIS — {restaurante}*\n━━━━━━━━━━━━━━━━━━━━\n\n{listaItens}\n\n👉 *Digite o número do imóvel para ver detalhes e agendar uma visita:* (Ex: 1)\n_Ou envie *MENU* para voltar._`,
+    infoRestaurante: `📍 *INFORMAÇÕES & ATENDIMENTO — {restaurante}* 🏡\n\n🏠 *Endereço do Escritório:* {endereco}\n🗓️ *Horário de Atendimento:* {horarioAlmoco} às {horarioJantar}\n📱 *WhatsApp do Corretor:* {telefoneDono}\n\n_Envie *1* para ver imóveis ou *2* para agendar uma visita._`,
+    pedidoConfirmadoCliente: `🎉 *VISITA AGENDADA COM SUCESSO!* 🎉\n\n🏡 *{restaurante}*\n━━━━━━━━━━━━━━━━━━━━\n🎫 *Código da Visita:* *{codigo}*\n👤 *Cliente:* {nome}\n{localEntrega}\n━━━━━━━━━━━━━━━━━━━━\n🏡 *IMÓVEL:*\n{itens}\n\n⏳ *Data e Horário:* {tempo}\n👨‍💼 *Status Atual:* 🟡 _Visita confirmada na agenda do corretor!_\n\n_Nosso corretor entrará em contato ou aguardará você no local e horário agendado!_ 🏡🔑`,
+    notificacaoCozinha: `🚨 *NOVA VISITA AGENDADA!* [{codigo}]\n━━━━━━━━━━━━━━━━━━━━\n👤 *Cliente:* {nome}\n📱 *WhatsApp:* {telefone}\n{localEntrega}\n\n🏡 *IMÓVEL:* {itens}\n\n⏰ *Data/Horário:* {hora} | 🆔 *ID:* {id}`,
+    pedidoEmPreparo: `🏡 *O corretor já está a caminho ou pronto para sua visita agendada [{codigo}]!*`,
+    pedidoSaiuEntrega: `🔔 *Lembrete: Sua visita ao imóvel [{codigo}] está agendada para hoje!*`,
+    pedidoProntoRetirada: `🏡 *Visita confirmada!*`,
+    pedidoConcluido: `✅ *Visita [{codigo}] realizada com sucesso! Conte conosco para fechar o melhor negócio!* 🏡🔑`,
+    pedidoCancelado: `✅ Sua visita *{codigo}* foi cancelada com sucesso!\n\nCaso queira agendar outro dia ou ver mais imóveis, basta enviar *MENU*.`
+};
+
 // Mapa nicho → mensagens padrão (fallback para delivery)
 const MENSAGENS_NICHO = {
-    delivery:   MENSAGENS_DELIVERY,
-    barbershop: montarTemplatesAgendamento(),
-    barbearia:  montarTemplatesAgendamento(),
-    clinic:     montarTemplatesAgendamento(),
-    clinica:    montarTemplatesAgendamento(),
-    petshop:    montarTemplatesAgendamento(),
-    salon:      montarTemplatesAgendamento()
+    delivery:    MENSAGENS_DELIVERY,
+    barbershop:  montarTemplatesAgendamento(),
+    barbearia:   montarTemplatesAgendamento(),
+    clinic:      montarTemplatesAgendamento(),
+    clinica:     montarTemplatesAgendamento(),
+    petshop:     montarTemplatesAgendamento(),
+    salon:       montarTemplatesAgendamento(),
+    corretores:  MENSAGENS_CORRETORES,
+    imoveis:     MENSAGENS_CORRETORES,
+    imobiliaria: MENSAGENS_CORRETORES,
+    corretor:    MENSAGENS_CORRETORES
 };
 
 // Resolve as mensagens padrão de um nicho (sem fallback para delivery)
